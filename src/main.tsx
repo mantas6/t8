@@ -5,7 +5,7 @@
  * handles SIGTERM, SIGHUP, ... by destroying itself, which lands here), and
  * uncaught errors.
  *
- * Usage: bun run dev [--server <url>] [--token-file <path>] [--thread <id>]
+ * Usage: t3tui [--server <url>] [--token-file <path>] [--thread <id>]
  */
 import { parseArgs } from "node:util";
 import { createCliRenderer } from "@opentui/core";
@@ -22,7 +22,7 @@ import { describeError, makeBackend } from "./tui/backend.ts";
 
 const USAGE = `t3tui: terminal client for a T3 Code server
 
-Usage: bun run dev [options]
+Usage: t3tui [options]  (from a checkout: bun run dev [options])
 
 Options:
   --server <url>        Server URL (default http://localhost:3773)
