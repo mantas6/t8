@@ -142,6 +142,65 @@ Bun FFI. It only links against glibc (`libc`, `libm`, `libpthread`, `libdl`),
 which Bun has already loaded, so it works on NixOS without `nix-ld` or
 patching.
 
+## Install with Nix
+
+The flake builds a `t3tui` command that runs the sources with Bun from
+nixpkgs (currently for `x86_64-linux`). Replace `<owner>` with the GitHub
+owner of this repository.
+
+```sh
+# Run without installing
+nix run github:<owner>/t3tui -- --server http://localhost:3773 --thread <threadId>
+
+# Install into your profile
+nix profile install github:<owner>/t3tui
+```
+
+As a flake input of a NixOS or home-manager configuration:
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    t3tui = {
+      url = "github:<owner>/t3tui";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { nixpkgs, t3tui, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ({ pkgs, ... }: {
+          # NixOS; for home-manager use home.packages instead
+          environment.systemPackages = [
+            t3tui.packages.${pkgs.stdenv.hostPlatform.system}.default
+          ];
+        })
+      ];
+    };
+  };
+}
+```
+
+From a checkout: `nix build` (the result is `./result/bin/t3tui`), `nix run . -- --help`,
+and `nix flake check` (builds the package and checks the Nix formatting).
+
+### Updating the dependency hash
+
+The Nix build installs the dependencies in a fixed-output derivation whose hash
+is recorded in `nix/deps-hash.txt`. The hash is the same on every system. When
+it is stale (after changing `bun.lock`, or when a `nix flake update` brings a
+new Bun), the build fails with a hash mismatch; put the new hash in the file:
+
+```sh
+nix build .#t3tui.node_modules 2>&1 | grep 'got:'
+#          got:    sha256-...
+echo 'sha256-...' > nix/deps-hash.txt
+nix build
+```
+
 ## Third-party code
 
 The vendored contracts in `vendor/contracts` are MIT licensed by
