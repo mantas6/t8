@@ -452,7 +452,7 @@ describe("thread picker sections and layouts", () => {
         showArchived: false,
         hiddenSettled: 4,
       }),
-    ).toBe("by project (C-g flat) · 4 settled/snoozed hidden (C-s shows)");
+    ).toBe("by project (C-g flat) · 4 settled/snoozed hidden (C-s)");
   });
 
   test("flat: most recent first across projects, settled / snoozed at the bottom", () => {
@@ -496,7 +496,7 @@ describe("thread picker sections and layouts", () => {
         showArchived: true,
         hiddenSettled: 0,
       }),
-    ).toBe("recent first (C-g groups) · archived shown (C-a hides)");
+    ).toBe("recent first (C-g groups) · archived shown (C-a)");
   });
 
   test("a snooze that ran out or was broken by a request puts the thread back", () => {
@@ -593,7 +593,7 @@ describe("thread picker: subagent threads", () => {
         showSubagents: false,
         hiddenSubagents: 4,
       }),
-    ).toBe("by project (C-g flat) · 4 subagents hidden (C-x shows)");
+    ).toBe("by project (C-g flat) · 4 subagents hidden (C-x)");
     expect(
       threadPickerFooter({
         layout: "grouped",
@@ -602,7 +602,7 @@ describe("thread picker: subagent threads", () => {
         hiddenSettled: 0,
         hiddenSubagents: 1,
       }),
-    ).toBe("by project (C-g flat) · 1 subagent hidden (C-x shows)");
+    ).toBe("by project (C-g flat) · 1 subagent hidden (C-x)");
     // Narrowed to a project: only its subagents are counted.
     expect(
       buildThreadRows(withSubagents, { ...LIST, ...base, projectId: "p2" }).hiddenSubagents,
@@ -650,7 +650,7 @@ describe("thread picker: subagent threads", () => {
         showSubagents: true,
         hiddenSubagents: 0,
       }),
-    ).toBe("by project (C-g flat) · subagents shown (C-x hides)");
+    ).toBe("by project (C-g flat) · subagents shown (C-x)");
   });
 
   test("the parent's section decides: a settled parent takes its subagents along", () => {

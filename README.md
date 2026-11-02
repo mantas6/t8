@@ -204,8 +204,8 @@ open thread and reloads the thread list from the new server.
 The thread picker groups threads by project, newest activity first; `Ctrl-g`
 (or `:r`) switches to one flat list of every project's threads, most recent
 first, and back. Within a project (or the flat list) the active threads come
-first, then a dim **settled / snoozed** section, then archived threads when
-`Ctrl-a` shows them; `Ctrl-s` hides the settled / snoozed section. The layout
+first; settled and snoozed threads are hidden until `Ctrl-s` shows them, in a
+dim **settled / snoozed** section, and archived threads until `Ctrl-a` does. The layout
 and the toggles are kept for the session. Each row has its number (what
 `:b <n>` takes: it counts the rows in the order shown, so it follows the
 layout and the `Ctrl-s` toggle, but not the filter), a status glyph (`●`

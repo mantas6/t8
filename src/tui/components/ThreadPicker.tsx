@@ -475,16 +475,16 @@ export function threadPickerFooter(state: {
   if (!state.showSettled) {
     parts.push(
       state.hiddenSettled > 0
-        ? `${state.hiddenSettled} settled/snoozed hidden (C-s shows)`
-        : "settled hidden (C-s shows)",
+        ? `${state.hiddenSettled} settled/snoozed hidden (C-s)`
+        : "settled hidden (C-s)",
     );
   }
-  if (state.showSubagents === true) parts.push("subagents shown (C-x hides)");
+  if (state.showSubagents === true) parts.push("subagents shown (C-x)");
   else if ((state.hiddenSubagents ?? 0) > 0) {
     const count = state.hiddenSubagents ?? 0;
-    parts.push(`${count} subagent${count === 1 ? "" : "s"} hidden (C-x shows)`);
+    parts.push(`${count} subagent${count === 1 ? "" : "s"} hidden (C-x)`);
   }
-  if (state.showArchived) parts.push("archived shown (C-a hides)");
+  if (state.showArchived) parts.push("archived shown (C-a)");
   return parts.join(" · ");
 }
 

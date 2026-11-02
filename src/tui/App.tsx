@@ -942,7 +942,7 @@ export function App(props: AppProps) {
   const [threadProject, setThreadProject] = createSignal<ProjectId | null>(null);
   const [showArchived, setShowArchived] = createSignal(false);
   /** Thread picker choices, kept for the session: settled / snoozed shown, and the layout. */
-  const [showSettled, setShowSettled] = createSignal(true);
+  const [showSettled, setShowSettled] = createSignal(false);
   const [showSubagents, setShowSubagents] = createSignal(false);
   const [threadLayout, setThreadLayout] = createSignal<ThreadLayout>("grouped");
   const listOptions = (): ThreadListOptions => ({

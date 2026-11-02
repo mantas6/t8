@@ -354,21 +354,22 @@ describe("App", () => {
     expect(picker).toMatch(/1 · t8 smoke test\s+idle\s+t8/);
     expect(picker).toMatch(/2 ● Fix the build\s+working\s+t8/);
     expect(picker).toMatch(/3 · Landing page copy\s+idle\s+website/);
-    expect(picker).toContain("settled / snoozed  2");
-    expect(picker).toMatch(/4 · Revisit pricing\s+snoozed until 3h/);
-    expect(picker).toMatch(/5 · Old copy\s+settled/);
+    // Settled and snoozed threads are hidden by default.
+    expect(picker).not.toContain("Revisit pricing");
+    expect(picker).toContain("2 settled/snoozed hidden (C-s)");
     expect(picker).toContain("by project (C-g flat)");
 
-    // Ctrl-S hides the section (and its numbers); the choice is kept.
+    // Ctrl-S shows the section with its own numbers; the choice is kept.
     app.mockInput.pressKey("s", { ctrl: true });
-    const hidden = await app.frame();
-    expect(hidden).not.toContain("Revisit pricing");
-    expect(hidden).toContain("2 settled/snoozed hidden (C-s shows)");
+    const shown = await app.frame();
+    expect(shown).toContain("settled / snoozed  2");
+    expect(shown).toMatch(/4 · Revisit pricing\s+snoozed until 3h/);
+    expect(shown).toMatch(/5 · Old copy\s+settled/);
     app.mockInput.pressEscape();
     await app.frame();
-    expect(await command(app, "t")).not.toContain("Old copy");
+    expect(await command(app, "t")).toContain("Old copy");
     app.mockInput.pressKey("s", { ctrl: true });
-    expect(await app.frame()).toContain("Old copy");
+    expect(await app.frame()).not.toContain("Old copy");
 
     // Ctrl-G: flat, most recent first; numbers follow the rows, and :b uses them.
     app.mockInput.pressKey("g", { ctrl: true });
@@ -475,13 +476,13 @@ describe("App", () => {
     expect(picker).toMatch(/1 · t8 smoke test\s+idle/);
     expect(picker).toMatch(/2 \? Fix the build\s+↳ approval/);
     expect(picker).toMatch(/t8 +2/);
-    expect(picker).toContain("2 subagents hidden (C-x shows)");
+    expect(picker).toContain("2 subagents hidden (C-x)");
 
     app.mockInput.pressKey("x", { ctrl: true });
     const shown = await app.frame();
     expect(shown).toMatch(/1 · t8 smoke test[^\n]*\n[^\n]*- · ↳ Delegated reviewer\s+idle/);
     expect(shown).toMatch(/2 \? Fix the build[^\n]*\n[^\n]*- \? ↳ Delegated helper\s+approval/);
-    expect(shown).toContain("subagents shown (C-x hides)");
+    expect(shown).toContain("subagents shown (C-x)");
     // Kept for the session.
     app.mockInput.pressEscape();
     await app.frame();
