@@ -1,7 +1,7 @@
 /**
  * The full-screen TUI: status line, transcript, and the input (or the
  * pending request prompt) with a hint line, plus the picker overlays (`:t`,
- * `:p`, `:m`, `:mode`, `:queue`) drawn over the transcript. All keys go
+ * `:p`, `:m`, `:mode`, `:queue`, `:servers`) drawn over the transcript. All keys go
  * through one global handler that picks the keymap layer for the current
  * view (`keymap.ts`), runs it through the prefix/count state machine
  * (`keys.ts`) and dispatches actions.
@@ -39,6 +39,8 @@ import {
 import { createStore, reconcile, unwrap } from "solid-js/store";
 
 import { type DeliveryIntent, newCommandId, newMessageId } from "../commands.ts";
+import type { ProfileEntry } from "../connect.ts";
+import { canOperate } from "../pairing.ts";
 import { selectProjectGroups } from "../state/selectors.ts";
 import type {
   DisplayItem,
@@ -50,12 +52,13 @@ import type {
   ThreadSummary,
   ToolCallDisplayItem,
 } from "../state/types.ts";
-import { type Backend, describeError, type ModelCatalog } from "./backend.ts";
+import { type Backend, describeError, type ModelCatalog, type ServerView } from "./backend.ts";
 import { copyToClipboard } from "./clipboard.ts";
 import {
   type Command,
   Completer,
   type CompletionSources,
+  keepInHistory,
   LineHistory,
   parseCommandLine,
   quitBlocker,
@@ -75,6 +78,7 @@ import {
   RequestPrompt,
   type UserInputProgress,
 } from "./components/RequestPrompt.tsx";
+import { buildServerRows, ServerPicker } from "./components/ServerPicker.tsx";
 import { type StatusInfo, StatusLine } from "./components/StatusLine.tsx";
 import { buildThreadRows, ThreadPicker, threadIndex } from "./components/ThreadPicker.tsx";
 import { Transcript, type TranscriptController } from "./components/Transcript.tsx";
@@ -189,6 +193,7 @@ const PICKER_HINTS: Readonly<Record<PickerView, string>> = {
   models: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   modes: "j k move · Enter set the mode · Esc close",
   queue: "j k move · dd cancel · J K reorder · Esc close",
+  servers: "j k move · Enter switch to it · Esc close",
 };
 
 /** A text prompt in the bottom line (the `input` view), e.g. a new thread's title. */
@@ -202,6 +207,17 @@ interface InputPrompt {
 interface NewThreadDraft {
   readonly projectId: ProjectId | null;
   readonly title: string | null;
+}
+
+/** How the status line names the server: profile (and label), else the environment or host. */
+export function serverDisplayName(server: ServerView, environmentLabel: string | null): string {
+  if (server.profile !== null) {
+    return server.label !== null && server.label !== server.profile
+      ? `${server.profile} (${server.label})`
+      : server.profile;
+  }
+  if (environmentLabel !== null) return environmentLabel;
+  return URL.parse(server.server)?.host ?? server.server;
 }
 
 const homeDirectory = process.env.HOME ?? "";
@@ -877,6 +893,8 @@ export function App(props: AppProps) {
   const pickerWidth = () => Math.max(20, Math.min(110, dimensions().width - 4)) - 4;
 
   const [archived, setArchived] = createSignal<ReadonlyArray<ThreadSummary>>([]);
+  /** Saved profiles for `:servers`; null while loading. */
+  const [serverEntries, setServerEntries] = createSignal<ReadonlyArray<ProfileEntry> | null>(null);
   const pickerGroups = createMemo((): ReadonlyArray<ProjectGroup> => {
     const groups = shell.groups();
     if (!showArchived()) return groups;
@@ -955,6 +973,21 @@ export function App(props: AppProps) {
       }
       case "queue":
         return { rows: buildQueueRows(thread.queue(), pickerWidth()), initial: 0 };
+      case "servers": {
+        const current = backend.server().profile;
+        const rows = buildServerRows(serverEntries() ?? [], {
+          current,
+          width: pickerWidth(),
+          now: Date.now(),
+        });
+        return {
+          rows,
+          initial: Math.max(
+            0,
+            rows.findIndex((row) => row.key === current),
+          ),
+        };
+      }
       default:
         return { rows: [], initial: 0 };
     }
@@ -1204,6 +1237,16 @@ export function App(props: AppProps) {
       case "queue":
         closePicker();
         return;
+      case "servers": {
+        const entry = row.value as ProfileEntry;
+        closePicker();
+        if (entry.name === backend.server().profile) {
+          notice(`already on ${entry.name}`);
+          return;
+        }
+        switchServer(entry.name, () => backend.switchProfile(entry.name).then(() => undefined));
+        return;
+      }
     }
   };
 
@@ -1270,6 +1313,66 @@ export function App(props: AppProps) {
       return;
     }
     closePicker();
+  };
+
+  // Servers ----------------------------------------------------------------
+
+  const openServerPicker = () => {
+    setServerEntries(null);
+    openPicker("servers");
+    backend.servers().then(
+      (entries) => {
+        setServerEntries(entries);
+        if (ui.view() === "servers") setCursor(pickerList().initial);
+      },
+      (error) => {
+        if (ui.view() === "servers") closePicker();
+        notice(`could not read the saved servers: ${describeError(error)}`, "error", 8_000);
+      },
+    );
+  };
+
+  /** Forgets everything that belonged to the previous server. */
+  const resetForNewServer = () => {
+    if (ui.mode() === "insert") ui.setMode("normal");
+    ui.setFocusedId(null);
+    ui.setFollow(true);
+    setToolResults(reconcile({}));
+    setCatalog(null);
+    setLastModel(null);
+    setArchived([]);
+    setShowArchived(false);
+    untitled.clear();
+    answered.clear();
+  };
+
+  let switching = false;
+  const switchServer = (what: string, run: () => Promise<string | undefined>) => {
+    if (switching) {
+      notice("already switching servers", "warn");
+      return;
+    }
+    switching = true;
+    notice(`connecting to ${what}…`, "info", 30_000);
+    run().then(
+      (message) => {
+        switching = false;
+        resetForNewServer();
+        notice(typeof message === "string" ? message : `switched to ${what}`, "info", 8_000);
+      },
+      (error) => {
+        switching = false;
+        notice(describeError(error), "error", 15_000);
+      },
+    );
+  };
+
+  const connectLink = (link: string) => {
+    switchServer("the server", async () => {
+      const saved = await backend.connectLink(link);
+      const readOnly = canOperate(saved.scope) ? "" : " (read-only)";
+      return `${saved.created ? "saved" : "updated"} profile ${saved.name}${readOnly}; switched to it`;
+    });
   };
 
   // Commands ---------------------------------------------------------------
@@ -1412,6 +1515,27 @@ export function App(props: AppProps) {
             : "reconnecting…",
         );
         return;
+      case "connect":
+        if (command.link === null) {
+          notice(
+            "paste a pairing link (Settings → Connections, or `t3 pair` on the host)",
+            "info",
+            15_000,
+          );
+          askText({
+            prefix: "pairing link: ",
+            hint: "paste the link from Settings → Connections (or `t3 pair`) · Enter connect · Esc cancel",
+            onSubmit: (text) => {
+              if (text.trim() !== "") connectLink(text.trim());
+            },
+          });
+        } else {
+          connectLink(command.link);
+        }
+        return;
+      case "servers":
+        openServerPicker();
+        return;
       case "usage":
         notice(command.message, "warn");
         return;
@@ -1427,7 +1551,7 @@ export function App(props: AppProps) {
     const prompt = inputPrompt();
     closeLine();
     if (kind === "command") {
-      histories.command.push(text);
+      if (keepInHistory(text)) histories.command.push(text);
       runCommand(parseCommandLine(text));
     } else if (kind === "search") {
       histories.search.push(text);
@@ -1704,6 +1828,13 @@ export function App(props: AppProps) {
         mode={mode}
         info={info}
         connection={() => shell.state.connection}
+        server={() => {
+          const connection = shell.state.connection;
+          return serverDisplayName(
+            backend.server(),
+            connection.state === "connected" ? connection.environmentLabel : null,
+          );
+        }}
         notice={ui.notice}
         pendingKeys={ui.pendingKeys}
         width={() => dimensions().width}
@@ -1843,6 +1974,15 @@ export function App(props: AppProps) {
           <ModePicker
             rows={() => pickerList().rows}
             cursorRow={pickerCursorRow}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "servers"}>
+          <ServerPicker
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            loading={() => serverEntries() === null}
             width={() => dimensions().width}
             height={() => dimensions().height}
           />

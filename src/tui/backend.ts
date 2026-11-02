@@ -28,6 +28,7 @@ import * as Effect from "effect/Effect";
 import type * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import { type Accessor, createSignal } from "solid-js";
 import {
   archiveThread,
   cancelQueuedRun,
@@ -44,6 +45,13 @@ import {
   setModelSelection,
   setRuntimeMode,
 } from "../commands.ts";
+import { loadProfileConfig, type ResolvedConfig } from "../config.ts";
+import {
+  connectAndSave,
+  listProfiles,
+  type ProfileEntry,
+  type SavedConnection,
+} from "../connect.ts";
 import { Connection, describeStatus, type Session } from "../connection/connection.ts";
 import { toThreadSummary } from "../state/reducers/shell.ts";
 import { toDisplayItem } from "../state/selectors.ts";
@@ -145,9 +153,36 @@ export const awaitConnected = (grace: Duration.Input = CONNECT_GRACE) =>
     return yield* new NotConnectedError({ message: `not connected (${describeStatus(status)})` });
   });
 
+/** The server the TUI is pointed at, for the status line. */
+export interface ServerView {
+  /** Profile name; null when the server came from flags or the environment only. */
+  readonly profile: string | null;
+  readonly label: string | null;
+  readonly server: string;
+}
+
+export function toServerView(config: ResolvedConfig): ServerView {
+  return {
+    profile: config.profile?.name ?? null,
+    label: config.profile?.label ?? null,
+    server: config.serverUrl,
+  };
+}
+
 export interface Backend {
   readonly shell: ShellStore;
   readonly thread: ThreadStore;
+  /** The server currently targeted. */
+  readonly server: Accessor<ServerView>;
+  /** Saved profiles (`config.json`), read fresh on every call. */
+  servers(): Promise<ReadonlyArray<ProfileEntry>>;
+  /**
+   * Pairs with the server of a pairing link, saves it as a profile and
+   * switches to it. Rejects (with a readable message) without switching.
+   */
+  connectLink(link: string): Promise<SavedConnection>;
+  /** Switches to a saved profile: the stores are emptied and the connection re-dials. */
+  switchProfile(name: string): Promise<void>;
   /** Shows a thread in the thread store, replacing the open one. */
   openThread(threadId: ThreadId): void;
   send(
@@ -211,9 +246,26 @@ export async function makeBackend(
   const run = <A, E>(effect: Effect.Effect<A, E, Connection>): Promise<A> =>
     runtime.runPromise(awaitConnected().pipe(Effect.andThen(effect)));
   let catalog: Promise<ModelCatalog> | undefined;
+  const initialTarget = await runtime.runPromise(SubscriptionRef.get(connection.target));
+  const [server, setServer] = createSignal<ServerView>(toServerView(initialTarget));
+  const switchTo = async (config: ResolvedConfig) => {
+    catalog = undefined;
+    await runtime.runPromise(sync.switchServer(config));
+    setServer(toServerView(config));
+  };
   return {
     shell: sync.shell,
     thread: sync.thread,
+    server,
+    servers: () => listProfiles(),
+    connectLink: async (link) => {
+      const saved = await connectAndSave({ pairingUrl: link });
+      await switchTo(await loadProfileConfig(saved.name));
+      return saved;
+    },
+    switchProfile: async (name) => {
+      await switchTo(await loadProfileConfig(name));
+    },
     openThread: (threadId) => {
       runtime.runFork(sync.openThread(threadId));
     },

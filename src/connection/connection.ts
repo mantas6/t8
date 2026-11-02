@@ -22,6 +22,11 @@
  *   fixing the token file and running `:reconnect` is enough). `sessions`
  *   fails while the status is `failed`; subscribers that want to survive a
  *   restart wait for the status to change and subscribe again (`StateSync`).
+ * - Target: the server and token source live in a `SubscriptionRef`; each
+ *   attempt reads it. `setTarget` swaps it (the TUI's `:connect` and
+ *   `:servers`): an attempt still dialling the old server is abandoned, a
+ *   connected session is ended, and the next attempt dials the new target
+ *   at once.
  * - Session scopes: each connected session's resources live in their own
  *   scope, closed once the next session has connected (or on a fatal error /
  *   shutdown). Closing it interrupts the old session's open requests; streams
@@ -49,7 +54,7 @@ import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as Socket from "effect/socket/Socket";
 
-import { ConfigError, type ResolvedConfig, readToken } from "../config.ts";
+import { ConfigError, isExpired, type ResolvedConfig, readToken } from "../config.ts";
 import { versionGate } from "./environment.ts";
 import {
   makeWsRpcProtocolClient,
@@ -92,7 +97,13 @@ export type ConnectionStatus =
 export class Connection extends Context.Service<
   Connection,
   {
-    readonly config: ResolvedConfig;
+    /** The server and token source the next attempt dials. */
+    readonly target: SubscriptionRef.SubscriptionRef<ResolvedConfig>;
+    /**
+     * Switches to another server: replaces the target and reconnects at once
+     * (ending the current session, or abandoning an attempt in progress).
+     */
+    readonly setTarget: (target: ResolvedConfig) => Effect.Effect<void>;
     /** Current status; `SubscriptionRef.changes` streams it, starting with the current value. */
     readonly status: SubscriptionRef.SubscriptionRef<ConnectionStatus>;
     /** Waits for a connected session. Fails if the connection failed fatally. */
@@ -163,6 +174,8 @@ function errorMessage(cause: unknown): string {
 export const diagnoseHandshake = (
   wsUrl: string,
   token: string,
+  /** Where the token came from, for the advice on a rejected token. */
+  config?: Pick<ResolvedConfig, "profile">,
 ): Effect.Effect<ConnectionFatalError | string> =>
   Effect.tryPromise({
     try: async (signal) => {
@@ -196,7 +209,7 @@ export const diagnoseHandshake = (
         case 401:
           return new ConnectionFatalError({
             reason: "unauthorized",
-            message: `server rejected the token (HTTP 401${detail ? `, ${detail}` : ""}); check the token file`,
+            message: `server rejected the token (HTTP 401${detail ? `, ${detail}` : ""}); ${rejectedTokenAdvice(config)}`,
           });
         case 403:
           return new ConnectionFatalError({
@@ -210,7 +223,25 @@ export const diagnoseHandshake = (
     Effect.catch((message) => Effect.succeed(message)),
   );
 
-export const make = Effect.fn("Connection.make")(function* (config: ResolvedConfig) {
+/** What to do about a token the server rejected. */
+export function rejectedTokenAdvice(
+  config: Pick<ResolvedConfig, "profile"> | undefined,
+  now: number = Date.now(),
+): string {
+  const profile = config?.profile ?? null;
+  const reconnect = "run `t3tui connect` with a new pairing link";
+  if (profile === null)
+    return `it may have expired or been revoked; ${reconnect}, or fix the token file`;
+  if (isExpired(profile.expiresAt, now)) {
+    return `the token saved for profile "${profile.name}" expired on ${profile.expiresAt?.slice(0, 10)}; ${reconnect}`;
+  }
+  return `the token saved for profile "${profile.name}" may have been revoked; ${reconnect}`;
+}
+
+export const make = Effect.fn("Connection.make")(function* (initialTarget: ResolvedConfig) {
+  const target = yield* SubscriptionRef.make(initialTarget);
+  /** Completed when the target changes, to abandon an attempt that has not connected yet. */
+  let targetChanged = yield* Deferred.make<void>();
   const status = yield* SubscriptionRef.make<ConnectionStatus>({ _tag: "connecting", attempt: 1 });
   /** Completed to end the supervisor's wait: the backoff delay, or the parked `failed` state. */
   const wake = yield* Ref.make(yield* Deferred.make<void>());
@@ -244,85 +275,125 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     }).pipe(Effect.andThen(closeRetired)),
   );
 
-  const connectOnce: Effect.Effect<AttemptOutcome, never, Scope.Scope> = Effect.gen(function* () {
-    const token = yield* Effect.tryPromise({
-      try: () => readToken(config.token),
-      catch: (cause) => cause,
-    }).pipe(Effect.result);
-    if (token._tag === "Failure") {
-      const cause = token.failure;
-      return {
-        _tag: "fatal",
-        error: new ConnectionFatalError({
-          reason: "config",
-          message: cause instanceof ConfigError ? cause.message : errorMessage(cause),
+  type Handshake =
+    | { readonly _tag: "outcome"; readonly outcome: AttemptOutcome }
+    | {
+        readonly _tag: "opened";
+        readonly client: WsRpcProtocolClient;
+        readonly environment: ExecutionEnvironmentDescriptor;
+        readonly disconnected: Deferred.Deferred<void>;
+        readonly pingTimedOut: Ref.Ref<boolean>;
+      };
+
+  /** Everything up to the socket being open; abandoned when the target changes. */
+  const handshake = (config: ResolvedConfig): Effect.Effect<Handshake, never, Scope.Scope> =>
+    Effect.gen(function* () {
+      const outcome = (value: AttemptOutcome): Handshake => ({ _tag: "outcome", outcome: value });
+      const token = yield* Effect.tryPromise({
+        try: () => readToken(config.token),
+        catch: (cause) => cause,
+      }).pipe(Effect.result);
+      if (token._tag === "Failure") {
+        const cause = token.failure;
+        return outcome({
+          _tag: "fatal",
+          error: new ConnectionFatalError({
+            reason: "config",
+            message: cause instanceof ConfigError ? cause.message : errorMessage(cause),
+          }),
+        });
+      }
+
+      const gate = yield* versionGate(config.serverUrl).pipe(Effect.result);
+      if (gate._tag === "Failure") {
+        const error = gate.failure;
+        return outcome(
+          error._tag === "ProtocolMismatchError"
+            ? {
+                _tag: "fatal",
+                error: new ConnectionFatalError({
+                  reason: "protocol-mismatch",
+                  message: error.message,
+                }),
+              }
+            : { _tag: "lost", reason: error.message, wasConnected: false },
+        );
+      }
+      const environment = gate.success;
+
+      const connected = yield* Deferred.make<void>();
+      const disconnected = yield* Deferred.make<void>();
+      const pingTimedOut = yield* Ref.make(false);
+      const hooks = RpcClient.ConnectionHooks.of({
+        onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
+        onDisconnect: Deferred.succeed(disconnected, undefined).pipe(Effect.asVoid),
+      });
+      const layerSocket = Socket.layerWebSocket(config.wsUrl, {
+        openTimeout: SOCKET_OPEN_TIMEOUT,
+        headers: { authorization: `Bearer ${token.success}` },
+      }).pipe(
+        Layer.provide(
+          bunWebSocketConstructor((socket) => {
+            currentSocket = socket;
+          }),
+        ),
+      );
+      const layerProtocol = Layer.effect(
+        RpcClient.Protocol,
+        RpcClient.makeProtocolSocket({
+          pingInterval: PING_INTERVAL,
+          pingTimeout: PING_TIMEOUT,
+          retryTransientErrors: false,
+          retryPolicy: Schedule.recurs(0),
+          onPingTimeout: Ref.set(pingTimedOut, true),
         }),
-      } as const;
-    }
+      ).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            layerSocket,
+            RpcSerialization.layerJson,
+            Layer.succeed(RpcClient.ConnectionHooks, hooks),
+          ),
+        ),
+      );
+      const protocolContext = yield* Layer.build(layerProtocol);
+      const client = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
 
-    const gate = yield* versionGate(config.serverUrl).pipe(Effect.result);
-    if (gate._tag === "Failure") {
-      const error = gate.failure;
-      return error._tag === "ProtocolMismatchError"
-        ? ({
-            _tag: "fatal",
-            error: new ConnectionFatalError({
-              reason: "protocol-mismatch",
-              message: error.message,
-            }),
-          } as const)
-        : ({ _tag: "lost", reason: error.message, wasConnected: false } as const);
-    }
-    const environment = gate.success;
-
-    const connected = yield* Deferred.make<void>();
-    const disconnected = yield* Deferred.make<void>();
-    const pingTimedOut = yield* Ref.make(false);
-    const hooks = RpcClient.ConnectionHooks.of({
-      onConnect: Deferred.succeed(connected, undefined).pipe(Effect.asVoid),
-      onDisconnect: Deferred.succeed(disconnected, undefined).pipe(Effect.asVoid),
+      const opened = yield* Deferred.await(connected).pipe(
+        Effect.as(true),
+        Effect.raceFirst(Deferred.await(disconnected).pipe(Effect.as(false))),
+      );
+      if (!opened) {
+        const diagnosis = yield* diagnoseHandshake(config.wsUrl, token.success, config);
+        return outcome(
+          typeof diagnosis === "string"
+            ? { _tag: "lost", reason: diagnosis, wasConnected: false }
+            : { _tag: "fatal", error: diagnosis },
+        );
+      }
+      return { _tag: "opened", client, environment, disconnected, pingTimedOut };
     });
-    const layerSocket = Socket.layerWebSocket(config.wsUrl, {
-      openTimeout: SOCKET_OPEN_TIMEOUT,
-      headers: { authorization: `Bearer ${token.success}` },
-    }).pipe(
-      Layer.provide(
-        bunWebSocketConstructor((socket) => {
-          currentSocket = socket;
-        }),
-      ),
-    );
-    const layerProtocol = Layer.effect(
-      RpcClient.Protocol,
-      RpcClient.makeProtocolSocket({
-        pingInterval: PING_INTERVAL,
-        pingTimeout: PING_TIMEOUT,
-        retryTransientErrors: false,
-        retryPolicy: Schedule.recurs(0),
-        onPingTimeout: Ref.set(pingTimedOut, true),
-      }),
-    ).pipe(
-      Layer.provide(
-        Layer.mergeAll(
-          layerSocket,
-          RpcSerialization.layerJson,
-          Layer.succeed(RpcClient.ConnectionHooks, hooks),
+
+  const connectOnce: Effect.Effect<AttemptOutcome, never, Scope.Scope> = Effect.gen(function* () {
+    const changed = targetChanged;
+    const config = yield* SubscriptionRef.get(target);
+    // A target change abandons the handshake; its resources live in the
+    // attempt scope, which the caller closes for a non-connected outcome.
+    const result = yield* handshake(config).pipe(
+      Effect.raceFirst(
+        Deferred.await(changed).pipe(
+          Effect.map((): Handshake => {
+            reconnectRequested = true;
+            return {
+              _tag: "outcome",
+              outcome: { _tag: "lost", reason: "switching server", wasConnected: false },
+            };
+          }),
         ),
       ),
     );
-    const protocolContext = yield* Layer.build(layerProtocol);
-    const client = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
-
-    const opened = yield* Deferred.await(connected).pipe(
-      Effect.as(true),
-      Effect.raceFirst(Deferred.await(disconnected).pipe(Effect.as(false))),
-    );
-    if (!opened) {
-      const diagnosis = yield* diagnoseHandshake(config.wsUrl, token.success);
-      return typeof diagnosis === "string"
-        ? ({ _tag: "lost", reason: diagnosis, wasConnected: false } as const)
-        : ({ _tag: "fatal", error: diagnosis } as const);
-    }
+    if (result._tag === "outcome") return result.outcome;
+    const { client, environment, disconnected, pingTimedOut } = result;
 
     generation += 1;
     liveGeneration = generation;
@@ -449,30 +520,44 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     Effect.asVoid,
   );
 
+  const forceReconnect = SubscriptionRef.get(status).pipe(
+    Effect.flatMap((current) => {
+      const socket = currentSocket;
+      const disconnected = currentDisconnected;
+      if (current._tag !== "connected" || disconnected === undefined) return reconnectNow;
+      return Effect.sync(() => {
+        reconnectRequested = true;
+        socket?.close(RECONNECT_CLOSE_CODE, "reconnect requested");
+      }).pipe(
+        // End the session now rather than when the close handshake finishes
+        // (an unresponsive server would hold it until the ping timeout).
+        Effect.andThen(Deferred.succeed(disconnected, undefined)),
+        Effect.asVoid,
+      );
+    }),
+  );
+
+  const setTarget = (next: ResolvedConfig) =>
+    Effect.gen(function* () {
+      yield* SubscriptionRef.set(target, next);
+      // Abandon an attempt still dialling the old target; the next one
+      // starts at once (`reconnectRequested`) and reads the new target.
+      const changed = targetChanged;
+      targetChanged = yield* Deferred.make<void>();
+      yield* Deferred.succeed(changed, undefined);
+      yield* forceReconnect;
+    });
+
   return Connection.of({
-    config,
+    target,
+    setTarget,
     status,
     session,
     client: Effect.map(session, (current) => current.client),
     sessions,
     subscribe,
     reconnectNow,
-    forceReconnect: SubscriptionRef.get(status).pipe(
-      Effect.flatMap((current) => {
-        const socket = currentSocket;
-        const disconnected = currentDisconnected;
-        if (current._tag !== "connected" || disconnected === undefined) return reconnectNow;
-        return Effect.sync(() => {
-          reconnectRequested = true;
-          socket?.close(RECONNECT_CLOSE_CODE, "reconnect requested");
-        }).pipe(
-          // End the session now rather than when the close handshake finishes
-          // (an unresponsive server would hold it until the ping timeout).
-          Effect.andThen(Deferred.succeed(disconnected, undefined)),
-          Effect.asVoid,
-        );
-      }),
-    ),
+    forceReconnect,
   });
 });
 

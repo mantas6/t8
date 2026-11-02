@@ -31,6 +31,7 @@ function config(tokenFile: string): ResolvedConfig {
     wsUrl: deriveWsUrl(serverUrl),
     token: { kind: "file", path: join(directory, tokenFile) },
     configDir: directory,
+    profile: null,
   };
 }
 
@@ -71,6 +72,24 @@ describe("Connection", () => {
     await Effect.runPromise(program);
   });
 
+  test("setTarget switches servers: the next attempt uses the new target", async () => {
+    const program = Effect.gen(function* () {
+      writeFileSync(join(directory, "token-b"), "test-token\n");
+      const connection = yield* ConnectionModule.make(config("token-b"));
+      // Server A answers 404: the attempt is lost and retried with backoff.
+      yield* waitFor(connection.status, (current) => current._tag === "disconnected");
+      const next = { ...config("token-missing"), profile: { name: "other" } };
+      yield* connection.setTarget(next);
+      expect((yield* SubscriptionRef.get(connection.target)).profile?.name).toBe("other");
+      // The switch skips the backoff; the new target's token file is missing.
+      const failed = yield* waitFor(connection.status, (current) => current._tag === "failed");
+      expect(
+        failed._tag === "Some" && failed.value._tag === "failed" && failed.value.error.message,
+      ).toContain("token-missing");
+    }).pipe(Effect.scoped);
+    await Effect.runPromise(program);
+  });
+
   test("commands fail fast while disconnected", async () => {
     const status = await Effect.runPromise(
       SubscriptionRef.make<ConnectionStatus>({
@@ -82,7 +101,8 @@ describe("Connection", () => {
     );
     const connection = Layer.succeed(Connection)(
       Connection.of({
-        config: config("unused"),
+        target: await Effect.runPromise(SubscriptionRef.make(config("unused"))),
+        setTarget: () => Effect.void,
         status,
         session: Effect.never,
         client: Effect.never,

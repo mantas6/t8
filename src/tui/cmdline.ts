@@ -29,6 +29,9 @@ export type Command =
   | { readonly type: "help" }
   | { readonly type: "archive" }
   | { readonly type: "reconnect" }
+  /** Pair with a server by link; null asks for the link. */
+  | { readonly type: "connect"; readonly link: string | null }
+  | { readonly type: "servers" }
   | { readonly type: "usage"; readonly message: string }
   | { readonly type: "unknown"; readonly name: string };
 
@@ -142,6 +145,20 @@ export const COMMAND_SPECS: ReadonlyArray<CommandSpec> = [
     parse: () => ({ type: "reconnect" }),
   },
   {
+    names: ["connect"],
+    arg: "text",
+    usage: ":connect [link]",
+    description: "pair with a server by its pairing link, save it and switch to it",
+    parse: (arg) => ({ type: "connect", link: arg === "" ? null : arg }),
+  },
+  {
+    names: ["servers"],
+    arg: "none",
+    usage: ":servers",
+    description: "saved servers; Enter switches",
+    parse: () => ({ type: "servers" }),
+  },
+  {
     names: ["help", "h"],
     arg: "none",
     usage: ":h  :help",
@@ -186,6 +203,15 @@ function split(input: string): { name: string; arg: string; argStart: number } {
   const rest = body.slice(nameLength);
   const gap = rest.match(/^\s*/)?.[0].length ?? 0;
   return { name, arg: rest.trim(), argStart: leading + nameLength + gap };
+}
+
+/**
+ * Whether a command line may be kept in the history: not `:connect <link>`,
+ * whose link carries a credential.
+ */
+export function keepInHistory(input: string): boolean {
+  const { name, arg } = split(input);
+  return !(BY_NAME.get(name)?.names[0] === "connect" && arg !== "");
 }
 
 export function parseCommandLine(input: string): Command {

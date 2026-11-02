@@ -8,6 +8,9 @@
  *   subscription, and a generation counter drops anything a cancelled
  *   subscription still delivers, so rapid switching is safe.
  * - Connection status is mirrored into the shell store.
+ * - `switchServer` points the connection at another server: both stores are
+ *   emptied first, and an epoch counter drops whatever the old server's
+ *   subscriptions still deliver.
  *
  * A failing reducer or subscription is reported through `onError` and never
  * takes the sync down. A failed subscription is retried after a delay; one
@@ -35,6 +38,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
+import type { ResolvedConfig } from "../config.ts";
 import { Connection, ConnectionFatalError } from "../connection/connection.ts";
 import { createShellStore, createThreadStore, type ShellStore, type ThreadStore } from "./store.ts";
 
@@ -62,6 +66,8 @@ export class StateSync extends Context.Service<
     readonly openThread: (threadId: ThreadId) => Effect.Effect<void>;
     /** Stops the thread subscription and empties the thread store. */
     readonly closeThread: Effect.Effect<void>;
+    /** Empties both stores and reconnects to another server. */
+    readonly switchServer: (target: ResolvedConfig) => Effect.Effect<void>;
   }
 >()("t3tui/StateSync") {}
 
@@ -162,19 +168,27 @@ export const make = Effect.fn("StateSync.make")(function* (options: SyncOptions 
     Effect.forkScoped,
   );
 
+  /** Bumped by `switchServer`; shell items from an earlier server are dropped. */
+  let serverEpoch = 0;
+
   const shellSubscription = (fresh: boolean) => {
     let skipResume = fresh;
     return connection
       .subscribe(({ client }) => {
+        const epoch = serverEpoch;
         const after = skipResume ? null : shell.state.sequence;
         skipResume = false;
         return client[ORCHESTRATION_V2_WS_METHODS.subscribeShell](
           after === null ? {} : { afterSequence: after },
-        );
+        ).pipe(Stream.map((item) => ({ epoch, item })));
       })
       .pipe(
-        Stream.runForEach((item: OrchestrationV2ShellStreamItem) =>
-          Effect.sync(() => safely(`shell ${item.kind}`, () => shell.apply(item))),
+        Stream.runForEach(
+          ({ epoch, item }: { epoch: number; item: OrchestrationV2ShellStreamItem }) =>
+            Effect.sync(() => {
+              if (epoch !== serverEpoch) return;
+              safely(`shell ${item.kind}`, () => shell.apply(item));
+            }),
         ),
       );
   };
@@ -228,7 +242,14 @@ export const make = Effect.fn("StateSync.make")(function* (options: SyncOptions 
     return FiberHandle.clear(threadFiber);
   });
 
-  return StateSync.of({ shell, thread, openThread, closeThread });
+  const switchServer = (target: ResolvedConfig) =>
+    Effect.suspend(() => {
+      serverEpoch += 1;
+      shell.reset();
+      return closeThread;
+    }).pipe(Effect.andThen(connection.setTarget(target)));
+
+  return StateSync.of({ shell, thread, openThread, closeThread, switchServer });
 });
 
 export const layer = (options: SyncOptions = {}): Layer.Layer<StateSync, never, Connection> =>

@@ -22,6 +22,58 @@ Code server **v0.1.2** (orchestration protocol 2).
 
 ## Running
 
+### Connecting
+
+t3tui signs in to a T3 Code server with a pairing link, like the other T3
+clients:
+
+1. Get a pairing link from the server: in the T3 Code app, **Settings →
+   Connections**, create a pairing link (shown as a link and a QR code); or
+   run `t3 pair` on the server's host, which prints a QR code and a
+   `Pairing URL:` line. A link works once and expires after a few minutes.
+2. Hand it to t3tui (quote it: the token is after a `#`):
+
+   ```sh
+   t3tui connect 'https://host:3773/pair#token=...'
+   t3tui connect --host http://host:3773 --code <pairing-code>   # the same, in two parts
+   t3tui connect                                                 # paste the link at the prompt
+   ```
+
+   This checks that the server is reachable and speaks this client's
+   protocol (so a link is not spent on a server t3tui cannot use), redeems
+   the link for a bearer token (scopes `orchestration:read` and
+   `orchestration:operate`), and saves it as a **profile**: the token goes
+   to `~/.config/t3tui/<profile>.token` (mode 600) and the profile to
+   `config.json`. Links on `app.t3.codes` (`.../pair?host=<server>#token=...`)
+   work too.
+3. Run `t3tui`. That is all.
+
+Each server is a profile, named after the server's label unless you pass
+`--name <profile>`; pairing the same server again updates its profile. The
+first profile becomes the default; `--default` makes a later one the default.
+
+```sh
+t3tui servers                   # list profiles (* marks the default) and when their tokens expire
+t3tui -p work                   # use another profile (or T3TUI_PROFILE=work)
+t3tui forget work               # remove a profile and its token file
+```
+
+Inside the TUI, `:connect <link>` pairs and switches to the new server, and
+`:servers` lists the profiles (Enter switches). The status line shows which
+one is in use.
+
+The token the server issues is valid for 30 days (T3 Code v0.1.2 has no way
+to renew a bearer token). When it has expired or been revoked, the
+connection fails with a message saying so: run `t3tui connect` with a new
+link. `t3tui forget` does not end the session on the server; revoke it in
+Settings → Connections or with `t3 auth session revoke`.
+
+Without pairing you can still mint a token on the server's host with
+`t3 auth session issue` and put it in `~/.config/t3tui/token` (see
+[Configuration](#configuration)).
+
+### From a checkout
+
 Requirements: Bun (the Nix flake provides it: `nix develop`, or `direnv allow`
 with the included `.envrc`).
 
@@ -34,13 +86,14 @@ bun run probe http://host:3773
 
 # Start the TUI
 bun run dev                           # then :t to pick a thread
-bun run dev --thread <threadId>       # also --server <url>, --token-file <path>
+bun run dev --thread <threadId>       # also -p <profile>, --server <url>, --token-file <path>
+bun run dev connect '<pairing link>'  # the commands above work the same way
 ```
 
 ### The TUI
 
 One full-screen surface: a status line on top (mode, project, branch, thread,
-model, run status, connection), the transcript in the middle, and the message
+model, run status, connection and server), the transcript in the middle, and the message
 input at the bottom with a hint line under it. When the agent asks for an
 approval or has a question, the input is replaced by the request so it cannot
 be missed. A banner appears under the status line while disconnected.
@@ -115,6 +168,8 @@ this session. An unknown command says so in the status line.
 | `:a` `:approve`         | approve the pending request                                    |
 | `:d` `:deny`            | deny the pending request                                       |
 | `:reconnect`            | reconnect now; after a fatal error, try again (token re-read)  |
+| `:connect [link]`       | pair with a server, save it as a profile and switch to it      |
+| `:servers`              | saved servers (profiles); Enter switches to one                |
 | `:h` `:help`            | keys and commands                                              |
 | `:q`                    | quit; refused while a run is active in the open thread         |
 | `:qa` `:q!`             | quit anyway                                                    |
@@ -133,6 +188,10 @@ Typing filters (fuzzy: `t3t` finds "t3tui"); the best match gets the cursor.
 | `dd`                            | thread picker: archive; queue: cancel (both ask `y`/`n`) |
 | `J` `K`                         | queue: move the message down / up                        |
 | `Ctrl-a`                        | thread picker: show / hide archived threads              |
+
+`:connect` without a link asks for it (paste it there; a link typed after
+`:connect` is not kept in the command history). Switching servers closes the
+open thread and reloads the thread list from the new server.
 
 The thread picker groups threads by project, newest activity first. Each row
 has its number (what `:b <n>` takes), a status glyph (`●` running, `?` waiting
@@ -181,25 +240,48 @@ have no npm build); nothing is downloaded at runtime.
 ### Configuration
 
 The client authenticates with a bearer token issued by the server (it needs the
-`orchestration:read` scope, plus `orchestration:operate` to send commands). Put
-it in a file readable only by you, by default `~/.config/t3tui/token`.
+`orchestration:read` scope, plus `orchestration:operate` to send commands).
+`t3tui connect` (above) gets one and saves it; the files are only readable by
+you.
+
+`$XDG_CONFIG_HOME/t3tui/config.json` (default `~/.config/t3tui/config.json`)
+holds the profiles. `connect` writes it; you can edit it too:
+
+```json
+{
+  "default": "home",
+  "servers": {
+    "home": {
+      "server": "http://localhost:3773",
+      "tokenFile": "home.token",
+      "environmentId": "…",
+      "label": "home",
+      "expiresAt": "2026-12-02T08:52:19.664Z",
+      "scope": "orchestration:read orchestration:operate"
+    }
+  }
+}
+```
+
+A relative `tokenFile` is resolved against the config directory. The older
+flat shape `{ "server": "http://localhost:3773", "tokenFile": "token" }` still
+works: it is read as a profile named `default` and converted the first time
+`connect` saves a profile (its token file is left where it is).
 
 Settings are resolved in this order (first wins):
 
 1. Flags: `--server <url>`, `--token-file <path>`
 2. Environment: `T3TUI_SERVER`, `T3TUI_TOKEN` (the token itself), `T3TUI_TOKEN_FILE`
-3. `$XDG_CONFIG_HOME/t3tui/config.json` (default `~/.config/t3tui/config.json`):
-
-   ```json
-   { "server": "http://localhost:3773", "tokenFile": "token" }
-   ```
-
-   A relative `tokenFile` is resolved against the config directory.
+3. The profile: `--profile <name>` / `-p`, else `T3TUI_PROFILE`, else the
+   `default` in `config.json`, else the only profile
 4. Defaults: `http://localhost:3773` and `~/.config/t3tui/token`
 
-The token is never accepted as a command-line argument. It is read again on
-every connection attempt: after the server rejected it (the status line says
-`failed`), fix the token file and run `:reconnect`.
+The token is never accepted as a command-line argument (a pairing link is:
+it works once and expires within minutes). The token is read again on every
+connection attempt: after the server rejected it (the status line says
+`failed`), fix the token file and run `:reconnect`. Switching with `:servers`
+or `:connect` uses the chosen profile as saved, ignoring the server and token
+overrides from flags and the environment.
 
 ### Headless CLI
 
@@ -214,6 +296,7 @@ bun run cli respond <threadId> <requestId> --decision accept   # or --answers '{
 bun run cli interrupt <threadId>        # --run <runId> for one run
 bun run cli create <projectId> --title "..." --provider <instanceId> --model <model>
 bun run cli archive <threadId>
+bun run cli connect '<pairing link>'    # also servers, forget <profile>; -p <profile> on any command
 ```
 
 Add `--json` for one JSON summary per line or `--raw` for the full decoded

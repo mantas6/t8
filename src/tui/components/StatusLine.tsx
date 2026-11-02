@@ -1,7 +1,7 @@
 /**
  * Top status line: mode block, then project · branch · thread · model · run
- * status (dim), and on the right the notice / pending keys and the
- * connection state. When not connected a banner row is added below it.
+ * status (dim), and on the right the notice / pending keys, the
+ * connection state and the server (profile name). When not connected a banner row is added below it.
  */
 import { type Accessor, Show } from "solid-js";
 
@@ -57,12 +57,18 @@ export function StatusLine(props: {
   mode: Accessor<Mode>;
   info: Accessor<StatusInfo>;
   connection: Accessor<ConnectionView>;
+  /** Name of the server (profile); empty to leave it out. */
+  server?: Accessor<string>;
   notice: Accessor<Notice | null>;
   pendingKeys: Accessor<string>;
   width: Accessor<number>;
   now: Accessor<number>;
 }) {
-  const right = () => connectionLabel(props.connection(), props.now());
+  const right = () => {
+    const label = connectionLabel(props.connection(), props.now());
+    const server = props.server?.() ?? "";
+    return server === "" ? label : `${label} · ${truncate(server, 32)}`;
+  };
   const rightColor = () => {
     switch (props.connection().state) {
       case "connected":

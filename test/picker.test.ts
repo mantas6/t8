@@ -119,7 +119,8 @@ describe("picker navigation", () => {
     } as unknown as Session;
     const connection = Layer.succeed(Connection)(
       Connection.of({
-        config: {} as never,
+        target: {} as never,
+        setTarget: () => Effect.void,
         status: {} as never,
         session: Effect.succeed(session),
         client: Effect.succeed(session.client),

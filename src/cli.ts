@@ -1,7 +1,7 @@
 /**
  * Headless CLI over the connection and command layers.
  *
- * Usage: bun run cli <command> [args] [--server <url>] [--token-file <path>] [--json | --raw]
+ * Usage: bun run cli <command> [args] [-p <profile>] [--server <url>] [--token-file <path>] [--json | --raw]
  * Run `bun run cli --help` for the command list.
  */
 import { parseArgs } from "node:util";
@@ -41,7 +41,8 @@ import {
   respondToRequest,
   sendMessage,
 } from "./commands.ts";
-import { ConfigError, loadConfig, type ResolvedConfig } from "./config.ts";
+import { ConfigError, isExpired, loadConfig, type ResolvedConfig } from "./config.ts";
+import { PROFILE_COMMANDS, PROFILE_USAGE, runProfileCommand } from "./connect.ts";
 import * as ConnectionModule from "./connection/connection.ts";
 import { Connection, describeStatus } from "./connection/connection.ts";
 import { fetchEnvironment, summarizeEnvironment } from "./connection/environment.ts";
@@ -73,15 +74,17 @@ Commands:
        | --answers '<json object>'
                                Answer a pending runtime request
   archive <threadId>           Archive a thread
+${PROFILE_USAGE}
 
 Options:
+  -p, --profile <name>         Saved server to use (env T3TUI_PROFILE)
   --server <url>               Server URL (env T3TUI_SERVER, default http://localhost:3773)
   --token-file <path>          Bearer token file (env T3TUI_TOKEN / T3TUI_TOKEN_FILE)
   --json                       Print one JSON object per line (summaries)
   --raw                        Print one JSON object per line (full decoded stream items)
   -h, --help                   Show this help
 
-Config file: $XDG_CONFIG_HOME/t3tui/config.json ({ "server": ..., "tokenFile": ... })
+Config file: $XDG_CONFIG_HOME/t3tui/config.json (profiles; written by connect)
 `;
 
 const CONNECT_TIMEOUT = "20 seconds";
@@ -620,6 +623,7 @@ function parse(argv: ReadonlyArray<string>) {
       server: { type: "string" },
       "token-file": { type: "string" },
       token: { type: "string" },
+      profile: { type: "string", short: "p" },
       json: { type: "boolean", default: false },
       raw: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
@@ -649,6 +653,10 @@ function requireArg(value: string | undefined, name: string): string {
 }
 
 async function main(): Promise<number> {
+  const [first] = process.argv.slice(2);
+  if (first !== undefined && PROFILE_COMMANDS.has(first)) {
+    return runProfileCommand(process.argv.slice(2), "t3tui-cli");
+  }
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(process.argv.slice(2));
@@ -666,10 +674,19 @@ async function main(): Promise<number> {
 
   let config: ResolvedConfig;
   try {
-    config = await loadConfig({ server: values.server, tokenFile: values["token-file"] });
+    config = await loadConfig({
+      server: values.server,
+      tokenFile: values["token-file"],
+      profile: values.profile,
+    });
   } catch (cause) {
     info(`t3tui-cli: ${(cause as Error).message}`);
     return cause instanceof ConfigError ? 2 : 1;
+  }
+  if (config.profile !== null && isExpired(config.profile.expiresAt) && command !== "env") {
+    info(
+      `t3tui-cli: the token saved for profile "${config.profile.name}" expired; run connect with a new pairing link`,
+    );
   }
 
   let program: Effect.Effect<void, unknown, Connection>;

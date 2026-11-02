@@ -24,9 +24,13 @@ export type View =
   | "projects"
   | "models"
   | "modes"
-  | "queue";
+  | "queue"
+  | "servers";
 
-export type PickerView = Extract<View, "threads" | "projects" | "models" | "modes" | "queue">;
+export type PickerView = Extract<
+  View,
+  "threads" | "projects" | "models" | "modes" | "queue" | "servers"
+>;
 
 export const PICKER_VIEWS: ReadonlySet<View> = new Set<View>([
   "threads",
@@ -34,6 +38,7 @@ export const PICKER_VIEWS: ReadonlySet<View> = new Set<View>([
   "models",
   "modes",
   "queue",
+  "servers",
 ]);
 
 export const isPickerView = (view: View): view is PickerView => PICKER_VIEWS.has(view);

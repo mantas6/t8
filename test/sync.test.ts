@@ -106,7 +106,8 @@ function fakeConnection(streams: FakeStreams) {
         Stream.changesWith((a, b) => a.generation === b.generation),
       );
       return Connection.of({
-        config: {} as never,
+        target: {} as never,
+        setTarget: () => Effect.void,
         status: ref,
         session: Effect.succeed(makeSession(1)),
         client: Effect.succeed(makeSession(1).client),

@@ -8,11 +8,18 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
+import { createSignal } from "solid-js";
 
 import { createShellStore, createThreadStore } from "../src/state/store.ts";
 import type { DisplayItem, ProjectGroup } from "../src/state/types.ts";
 import { App, NO_THREAD_PLACEHOLDER } from "../src/tui/App.tsx";
-import type { Backend, ModelCatalog, NewThread, SendOptions } from "../src/tui/backend.ts";
+import type {
+  Backend,
+  ModelCatalog,
+  NewThread,
+  SendOptions,
+  ServerView,
+} from "../src/tui/backend.ts";
 import { copyToClipboard, osc52Sequence } from "../src/tui/clipboard.ts";
 import { findItem, findMatch, isMessage, itemText, oneLine, stepThread } from "../src/tui/nav.ts";
 import { question, requestEvents } from "./fixtures/requests.ts";
@@ -70,14 +77,54 @@ function fakeBackend() {
     modes: [] as string[],
     archived: [] as string[],
     reconnects: 0,
+    switched: [] as string[],
+    links: [] as string[],
     sendOptions: [] as SendOptions[],
     responses: [] as Array<{ requestId: string; response: unknown }>,
   };
   /** How many of the next sends / responses fail. */
   const failures = { send: 0, respond: 0 };
+  const [server, setServer] = createSignal<ServerView>({
+    profile: "home",
+    label: "home",
+    server: "http://localhost:3773/",
+  });
+  const profiles = [
+    { name: "home", profile: { server: "http://localhost:3773/", label: "home" } },
+    { name: "work", profile: { server: "https://work.example/", label: "build box" } },
+  ].map((entry) => ({ ...entry, isDefault: entry.name === "home", expired: false }));
   const backend: Backend = {
     shell,
     thread,
+    server,
+    servers: async () => profiles,
+    connectLink: async (link) => {
+      calls.links.push(link);
+      setServer({ profile: "lab", label: "lab", server: "http://lab:3773/" });
+      return {
+        name: "lab",
+        created: true,
+        isDefault: false,
+        defaultName: "home",
+        server: "http://lab:3773/",
+        label: "lab",
+        environmentId: "env-lab",
+        tokenPath: "/tmp/lab.token",
+        expiresAt: "2026-12-02T00:00:00.000Z",
+        expiresInSeconds: 2_592_000,
+        scope: "orchestration:read orchestration:operate",
+        migrated: false,
+      };
+    },
+    switchProfile: async (name) => {
+      calls.switched.push(name);
+      const entry = profiles.find((candidate) => candidate.name === name);
+      setServer({
+        profile: name,
+        label: entry?.profile.label ?? null,
+        server: entry?.profile.server ?? "",
+      });
+    },
     openThread: (threadId) => {
       calls.opened.push(threadId);
       thread.reset(threadId);
@@ -617,6 +664,44 @@ describe("App: sending", () => {
     app.mockInput.pressKey(" ");
     app.mockInput.pressKey("x");
     expect(await app.frame()).toContain("> d x");
+  });
+});
+
+describe("servers", () => {
+  test(":servers lists the profiles and Enter switches; the status line names the server", async () => {
+    const app = await mount(null);
+    expect(await app.frame()).toContain("· home");
+    await command(app, "servers");
+    const picker = await app.frame();
+    expect(picker).toContain("Servers");
+    expect(picker).toContain("build box");
+    expect(picker).toContain("https://work.example/");
+    app.mockInput.pressKey("j");
+    app.mockInput.pressEnter();
+    await app.frame();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(app.calls.switched).toEqual(["work"]);
+    const after = await app.frame();
+    expect(after).toContain("work (build box)");
+    expect(after).toContain("switched to work");
+  });
+
+  test(":connect pairs, switches, and keeps the link out of the history", async () => {
+    const app = await mount(null);
+    await app.frame();
+    await command(app, "connect http://lab:3773/pair#token=secret-credential");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(app.calls.links).toEqual(["http://lab:3773/pair#token=secret-credential"]);
+    const after = await app.frame();
+    expect(after).toContain("saved profile lab");
+    expect(after).toContain("· lab");
+
+    app.mockInput.pressKey(":");
+    await app.frame();
+    app.mockInput.pressArrow("up");
+    expect(await app.frame()).not.toContain("secret-credential");
+    app.mockInput.pressEscape();
+    await app.frame();
   });
 });
 

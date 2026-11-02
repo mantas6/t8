@@ -108,6 +108,8 @@ export interface ShellStore {
   /** Applies a shell stream item; returns whether anything changed. */
   readonly apply: (item: OrchestrationV2ShellStreamItem) => boolean;
   readonly setConnection: (status: ConnectionStatus) => boolean;
+  /** Forgets all projects and threads (another server); keeps the connection state. */
+  readonly reset: () => void;
   readonly dispose: () => void;
 }
 
@@ -134,6 +136,9 @@ export function createShellStore(initial: ShellState = initialShellState): Shell
       thread: (id) => state.threads[id],
       apply: (item) => update((current) => applyShellStreamItem(current, item)),
       setConnection: (status) => update((current) => applyConnectionStatus(current, status)),
+      reset: () => {
+        update((current) => ({ ...initialShellState, connection: current.connection }));
+      },
       dispose,
     };
   });

@@ -5,7 +5,8 @@
  * handles SIGTERM, SIGHUP, ... by destroying itself, which lands here), and
  * uncaught errors.
  *
- * Usage: t3tui [--server <url>] [--token-file <path>] [--thread <id>]
+ * Usage: t3tui [--profile <name>] [--server <url>] [--token-file <path>] [--thread <id>]
+ *        t3tui connect <pairing-link> | servers | forget <name>
  */
 import { parseArgs } from "node:util";
 import { createCliRenderer } from "@opentui/core";
@@ -15,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 
 import { ConfigError, loadConfig } from "./config.ts";
+import { PROFILE_COMMANDS, PROFILE_USAGE, runProfileCommand } from "./connect.ts";
 import * as ConnectionModule from "./connection/connection.ts";
 import * as StateSyncModule from "./state/sync.ts";
 import { App } from "./tui/App.tsx";
@@ -23,13 +25,21 @@ import { registerParsers } from "./tui/parsers.ts";
 
 const USAGE = `t3tui: terminal client for a T3 Code server
 
-Usage: t3tui [options]  (from a checkout: bun run dev [options])
+Usage: t3tui [options]            (from a checkout: bun run dev [options])
+       t3tui <command> [args]
+
+Commands:
+${PROFILE_USAGE}
 
 Options:
-  --server <url>        Server URL (default http://localhost:3773)
-  --token-file <path>   File holding the bearer token
+  -p, --profile <name>  Saved server to use (env T3TUI_PROFILE; default: the default profile)
+  --server <url>        Server URL (overrides the profile; default http://localhost:3773)
+  --token-file <path>   File holding the bearer token (overrides the profile)
   --thread <id>         Open this thread on start
   -h, --help            Show this help
+
+Get a pairing link in the T3 Code app (Settings → Connections) or with
+\`t3 pair\` on the server's host, then: t3tui connect '<link>'
 
 Press ? inside the app for the keys.
 `;
@@ -44,6 +54,7 @@ function parse(argv: ReadonlyArray<string>) {
       server: { type: "string" },
       "token-file": { type: "string" },
       token: { type: "string" },
+      profile: { type: "string", short: "p" },
       thread: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
     },
@@ -57,6 +68,10 @@ function parse(argv: ReadonlyArray<string>) {
 }
 
 async function main(): Promise<void> {
+  const [first] = process.argv.slice(2);
+  if (first !== undefined && PROFILE_COMMANDS.has(first)) {
+    process.exit(await runProfileCommand(process.argv.slice(2), "t3tui"));
+  }
   let values: ReturnType<typeof parse>;
   try {
     values = parse(process.argv.slice(2));
@@ -71,7 +86,11 @@ async function main(): Promise<void> {
 
   let config: Awaited<ReturnType<typeof loadConfig>>;
   try {
-    config = await loadConfig({ server: values.server, tokenFile: values["token-file"] });
+    config = await loadConfig({
+      server: values.server,
+      tokenFile: values["token-file"],
+      profile: values.profile,
+    });
   } catch (cause) {
     process.stderr.write(`t3tui: ${(cause as Error).message}\n`);
     process.exit(cause instanceof ConfigError ? 2 : 1);
