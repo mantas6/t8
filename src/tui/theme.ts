@@ -68,6 +68,12 @@ const SYNTAX: Readonly<Record<string, StyleDefinitionInput>> = {
   "punctuation.delimiter": { fg: colors.dim },
   tag: { fg: "#e06c75" },
   attribute: { fg: "#d19a66" },
+  label: { fg: "#c678dd" },
+  module: { fg: "#e5c07b" },
+  escape: { fg: "#56b6c2" },
+  "diff.plus": { fg: colors.ok },
+  "diff.minus": { fg: colors.error },
+  "diff.delta": { fg: "#61afef" },
 };
 
 /** `owner` is the renderer's native scene (`renderer.nativeScene`). */

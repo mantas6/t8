@@ -154,6 +154,14 @@ stdenvNoCC.mkDerivation {
     done
     test -e $share/node_modules/@opentui/${opentuiNative}/package.json
 
+    # The tree-sitter grammar packages are only used for their .wasm files and
+    # queries (see src/tui/parsers.ts); drop the C sources and Node bindings.
+    for dir in $share/node_modules/tree-sitter-* $share/node_modules/@tree-sitter-grammars/*; do
+      find "$dir" -mindepth 1 -maxdepth 1 \
+        ! -name '*.wasm' ! -name queries ! -name package.json ! -name LICENSE \
+        -exec rm -r {} +
+    done
+
     # Bun resolves bunfig.toml preloads against the working directory, so
     # point the Solid JSX preload at its absolute path in the store.
     preload=$(cd $share && bun --print 'Bun.resolveSync("@opentui/solid/preload", process.cwd())')
@@ -179,6 +187,15 @@ stdenvNoCC.mkDerivation {
     runHook preInstallCheck
 
     HOME=$(mktemp -d) $out/bin/${pname} --help | grep -q "Usage:"
+
+    # Every grammar file the TUI registers is in the package.
+    (cd $out/share/${pname} && HOME=$(mktemp -d) bun -e '
+      const { existsSync } = await import("node:fs");
+      const { extraParsers } = await import("./src/tui/parsers.ts");
+      const files = extraParsers().flatMap((p) => [p.wasm, ...p.queries.highlights, ...(p.queries.injections ?? [])]);
+      const missing = files.filter((file) => !existsSync(file));
+      if (missing.length > 0) throw new Error(`missing grammar files: ''${missing.join(" ")}`);
+    ')
 
     runHook postInstallCheck
   '';

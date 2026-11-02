@@ -139,6 +139,31 @@ with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty);
 elsewhere use `Ctrl-j` or `Alt-Enter`. Inside tmux, OSC 52 needs
 `set -g set-clipboard on` (or `allow-passthrough on`).
 
+#### Code blocks
+
+Fenced code blocks in messages and plans are syntax highlighted with
+tree-sitter. Besides the grammars OpenTUI bundles (JavaScript, TypeScript,
+JSX/TSX, Markdown, Zig), t3tui registers these (`src/tui/parsers.ts`):
+
+| Language | Fence info strings                                 |
+| -------- | -------------------------------------------------- |
+| Bash     | `bash`, `sh`, `shell`, `zsh`                       |
+| PHP      | `php` (with or without `<?php`)                    |
+| Nix      | `nix` (build phases, shell scripts as Bash)        |
+| Go       | `go`, `golang`                                     |
+| Python   | `python`, `py`                                     |
+| JSON     | `json`, `jsonc`                                    |
+| YAML     | `yaml`, `yml`                                      |
+| TOML     | `toml`                                             |
+| SQL      | `sql`, `postgresql`, `postgres`, `mysql`, `sqlite` |
+| HTML     | `html`, `htm`, `xhtml` (`<script>` as JavaScript)  |
+| CSS      | `css`                                              |
+| Diff     | `diff`, `patch`, `udiff`                           |
+
+A block in any other language is shown as plain code. The grammars are local
+files (pinned npm packages, and `vendor/grammars` for Nix, SQL and Diff, which
+have no npm build); nothing is downloaded at runtime.
+
 ### Configuration
 
 The client authenticates with a bearer token issued by the server (it needs the
@@ -257,3 +282,7 @@ nix build
 
 The vendored contracts in `vendor/contracts` are MIT licensed by
 T3 Tools Inc.; see `vendor/contracts/LICENSE`.
+
+The tree-sitter grammars and queries in `vendor/grammars` are MIT licensed by
+their authors; each directory has its `LICENSE` and a `VENDORED.md` with the
+source and version.

@@ -19,6 +19,7 @@ import * as ConnectionModule from "./connection/connection.ts";
 import * as StateSyncModule from "./state/sync.ts";
 import { App } from "./tui/App.tsx";
 import { describeError, makeBackend } from "./tui/backend.ts";
+import { registerParsers } from "./tui/parsers.ts";
 
 const USAGE = `t3tui: terminal client for a T3 Code server
 
@@ -86,6 +87,8 @@ async function main(): Promise<void> {
   const runtime = ManagedRuntime.make(layer);
   const backend = await makeBackend(runtime);
 
+  // Extra code-block grammars; must be registered before the first render.
+  registerParsers();
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     useKittyKeyboard: {},
