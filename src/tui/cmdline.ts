@@ -13,8 +13,11 @@ export type Command =
   | { readonly type: "write" }
   | { readonly type: "approve" }
   | { readonly type: "deny" }
-  /** Thread picker, optionally pre-filtered. */
-  | { readonly type: "threads"; readonly filter: string }
+  /**
+   * Thread picker, optionally pre-filtered; `flat` (`:recent`) opens it flat,
+   * most recent first; null keeps the layout used last.
+   */
+  | { readonly type: "threads"; readonly filter: string; readonly layout: "flat" | null }
   /** Project switcher; with a name, narrows the thread picker to that project directly. */
   | { readonly type: "projects"; readonly name: string }
   /** New thread; null title prompts for one. */
@@ -52,8 +55,15 @@ export const COMMAND_SPECS: ReadonlyArray<CommandSpec> = [
     names: ["threads", "t"],
     arg: "thread",
     usage: ":t [filter]",
-    description: "thread picker",
-    parse: (arg) => ({ type: "threads", filter: arg }),
+    description: "thread picker (in the layout used last)",
+    parse: (arg) => ({ type: "threads", filter: arg, layout: null }),
+  },
+  {
+    names: ["recent", "r"],
+    arg: "thread",
+    usage: ":r [filter]",
+    description: "thread picker, all projects, most recent first",
+    parse: (arg) => ({ type: "threads", filter: arg, layout: "flat" }),
   },
   {
     names: ["projects", "p"],

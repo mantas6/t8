@@ -83,7 +83,59 @@ export interface ThreadSummary {
   readonly archived: boolean;
   readonly pinned: boolean;
   readonly pinOrderKey: string | null;
+  /**
+   * Settled, as the web app decides it: `settledOverride === "settled"`. The
+   * server writes that override when it auto-settles a thread, and an explicit
+   * un-settle (`"active"`) keeps it out of the settled list.
+   */
+  readonly settled: boolean;
+  /** Epoch ms; when the thread was settled, for ordering the settled list. */
+  readonly settledAt: number | null;
+  /** Epoch ms; the snooze's wake time (it may have passed). */
+  readonly snoozedUntil: number | null;
+  /** Epoch ms; when the snooze started. */
+  readonly snoozedAt: number | null;
+  /** Epoch ms; when the latest run completed (a failure's time). */
+  readonly latestRunCompletedAt: number | null;
+  /** The thread's current pull request, when one is linked. */
+  readonly pullRequest: ThreadPullRequestSummary | null;
 }
+
+export interface ThreadPullRequestSummary {
+  readonly number: number;
+  readonly url: string;
+  readonly repository: string;
+  /** Null when the server has not synced the pull request yet. */
+  readonly state: "open" | "closed" | "merged" | null;
+  readonly draft: boolean;
+  readonly checks: "passing" | "failing" | "pending" | null;
+  /** Other visible pull requests linked to the thread. */
+  readonly others: number;
+}
+
+/** What the thread picker and status line show for a thread. */
+export type ThreadStatusKind =
+  | "archived"
+  | "approval"
+  | "working"
+  | "queued"
+  | "failed"
+  | "snoozed"
+  | "settled"
+  | "pr"
+  | "idle";
+
+/** A colour role; the TUI maps it to a colour. */
+export type StatusTone = "ok" | "warn" | "error" | "info" | "merged" | "dim";
+
+export interface ThreadStatus {
+  readonly kind: ThreadStatusKind;
+  readonly label: string;
+  readonly tone: StatusTone;
+}
+
+/** Where a thread goes in the thread list: the main list, or the settled / snoozed section. */
+export type ThreadSection = "active" | "snoozed" | "settled";
 
 export interface ShellState {
   readonly connection: ConnectionView;

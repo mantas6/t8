@@ -1,33 +1,30 @@
-/** `?` help: the keymap tables as a cheat sheet. j/k scroll, Esc closes. */
+/**
+ * `?` help: every keymap layer and the commands as a cheat sheet, with a
+ * filter line on top. Typing filters (fuzzy, on key, action and
+ * description); j/k scroll while the filter is empty, Esc clears it, then
+ * closes. Keys are handled in `App.tsx` (`helpKey`).
+ */
 import type { ScrollBoxRenderable } from "@opentui/core";
-import { For } from "solid-js";
+import { type Accessor, For, Show } from "solid-js";
 
-import { COMMAND_SPECS } from "../cmdline.ts";
-import { DEFAULT_KEYMAPS, helpRows } from "../keymap.ts";
+import type { HelpSection } from "../help.ts";
+import { fit } from "../picker.ts";
 import { colors } from "../theme.ts";
 
-const SECTIONS = [
-  { title: "NORMAL (transcript)", rows: helpRows(DEFAULT_KEYMAPS.normal) },
-  { title: "Pending request", rows: helpRows(DEFAULT_KEYMAPS.prompt) },
-  { title: "INSERT (message input)", rows: helpRows(DEFAULT_KEYMAPS.insert) },
-  { title: "Command / search line", rows: helpRows(DEFAULT_KEYMAPS.line) },
-  {
-    title: "Pickers (j k dd J K only while the filter is empty)",
-    rows: helpRows([...DEFAULT_KEYMAPS.picker, ...DEFAULT_KEYMAPS.pickerList]),
-  },
-  { title: "Confirm (y/n line)", rows: helpRows(DEFAULT_KEYMAPS.confirm) },
-  {
-    title: "Commands (Tab completes)",
-    rows: COMMAND_SPECS.filter((spec) => spec.usage !== "").map((spec) => ({
-      keys: spec.usage,
-      description: spec.description,
-    })),
-  },
-];
+const ACTION_WIDTH = 24;
 
-const KEY_WIDTH = 22;
-
-export function HelpOverlay(props: { ref: (element: ScrollBoxRenderable) => void }) {
+export function HelpOverlay(props: {
+  readonly ref: (element: ScrollBoxRenderable) => void;
+  readonly sections: Accessor<ReadonlyArray<HelpSection>>;
+  readonly filter: Accessor<string>;
+  readonly focused: Accessor<boolean>;
+  /** Width of the key column (kept while filtering, so rows do not jump). */
+  readonly keyWidth: number;
+}) {
+  const title = () =>
+    props.focused() || props.filter() !== ""
+      ? " Keys · type to filter · ↑↓ scroll · Esc clear "
+      : " Keys · type or / to filter · j/k scroll · Esc close ";
   return (
     <box
       position="absolute"
@@ -39,28 +36,49 @@ export function HelpOverlay(props: { ref: (element: ScrollBoxRenderable) => void
       border
       borderStyle="rounded"
       borderColor={colors.accent}
-      title=" Keys · j/k scroll · Esc close "
+      title={title()}
       titleColor={colors.accent}
-      backgroundColor="#16181d"
+      backgroundColor={colors.overlayBg}
       paddingLeft={1}
       paddingRight={1}
+      flexDirection="column"
     >
+      <text wrapMode="none" flexShrink={0}>
+        <span style={{ fg: colors.accent }}>{"> "}</span>
+        <Show
+          when={props.filter() !== "" || props.focused()}
+          fallback={<span style={{ fg: colors.faint }}>type to filter</span>}
+        >
+          <span style={{ fg: colors.fg }}>{props.filter()}</span>
+          <span style={{ fg: colors.accent }}>{props.focused() ? "▏" : ""}</span>
+        </Show>
+      </text>
       <scrollbox ref={props.ref} flexGrow={1} focusable={false}>
-        <For each={SECTIONS}>
-          {(section) => (
-            <box flexDirection="column" marginBottom={1} flexShrink={0}>
-              <text fg={colors.accent}>{section.title}</text>
-              <For each={section.rows}>
-                {(row) => (
-                  <text wrapMode="none">
-                    <span style={{ fg: colors.code }}>{row.keys.padEnd(KEY_WIDTH)}</span>
-                    <span style={{ fg: colors.fg }}>{row.description}</span>
-                  </text>
-                )}
-              </For>
-            </box>
-          )}
-        </For>
+        <Show
+          when={props.sections().length > 0}
+          fallback={<text fg={colors.dim}>{`no keys or commands match "${props.filter()}"`}</text>}
+        >
+          <For each={props.sections()}>
+            {(section) => (
+              <box flexDirection="column" marginBottom={1} flexShrink={0}>
+                <text fg={colors.accent}>{section.title}</text>
+                <For each={section.rows}>
+                  {(row) => (
+                    <text wrapMode="none">
+                      <span
+                        style={{ fg: colors.code }}
+                      >{`${fit(row.keys, props.keyWidth - 1)} `}</span>
+                      <span style={{ fg: colors.faint }}>
+                        {`${fit(row.action, ACTION_WIDTH - 1)} `}
+                      </span>
+                      <span style={{ fg: colors.fg }}>{row.description}</span>
+                    </text>
+                  )}
+                </For>
+              </box>
+            )}
+          </For>
+        </Show>
       </scrollbox>
     </box>
   );

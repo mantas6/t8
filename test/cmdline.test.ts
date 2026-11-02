@@ -28,8 +28,14 @@ describe("parseCommandLine", () => {
   });
 
   test("pickers and thread commands", () => {
-    expect(parseCommandLine("t")).toEqual({ type: "threads", filter: "" });
-    expect(parseCommandLine("threads t8")).toEqual({ type: "threads", filter: "t8" });
+    expect(parseCommandLine("t")).toEqual({ type: "threads", filter: "", layout: null });
+    expect(parseCommandLine("r")).toEqual({ type: "threads", filter: "", layout: "flat" });
+    expect(parseCommandLine("recent web")).toEqual({
+      type: "threads",
+      filter: "web",
+      layout: "flat",
+    });
+    expect(parseCommandLine("threads t8")).toEqual({ type: "threads", filter: "t8", layout: null });
     expect(parseCommandLine("p")).toEqual({ type: "projects", name: "" });
     expect(parseCommandLine("projects  my app ")).toEqual({ type: "projects", name: "my app" });
     expect(parseCommandLine("n")).toEqual({ type: "new", title: null });

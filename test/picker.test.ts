@@ -17,7 +17,12 @@ import { buildModelRows } from "../src/tui/components/ModelPicker.tsx";
 import { buildModeRows } from "../src/tui/components/ModePicker.tsx";
 import { buildProjectRows } from "../src/tui/components/ProjectPicker.tsx";
 import { buildQueueRows } from "../src/tui/components/QueueView.tsx";
-import { buildThreadRows, threadGlyph, threadIndex } from "../src/tui/components/ThreadPicker.tsx";
+import {
+  buildThreadRows,
+  threadGlyph,
+  threadIndex,
+  threadPickerFooter,
+} from "../src/tui/components/ThreadPicker.tsx";
 import { fuzzyFilter, fuzzyMatch } from "../src/tui/fuzzy.ts";
 import {
   clampCursor,
@@ -28,6 +33,7 @@ import {
   selectableIndices,
   windowStart,
 } from "../src/tui/picker.ts";
+import { colors } from "../src/tui/theme.ts";
 
 describe("fuzzyMatch", () => {
   test("subsequence, case-insensitive", () => {
@@ -209,6 +215,12 @@ function summary(id: string, projectId: string, title: string, extra: Partial<Th
     archived: false,
     pinned: false,
     pinOrderKey: null,
+    settled: false,
+    settledAt: null,
+    snoozedUntil: null,
+    snoozedAt: null,
+    latestRunCompletedAt: null,
+    pullRequest: null,
     ...extra,
   } satisfies ThreadSummary;
 }
@@ -234,46 +246,48 @@ const groups: ReadonlyArray<ProjectGroup> = [
   },
 ];
 
+const LIST = { layout: "grouped", showSettled: true, now: NOW } as const;
+const rowsOf = (built: { rows: ReadonlyArray<{ kind: string; key: string }> }) =>
+  built.rows.map((row) => `${row.kind}:${row.key}`);
+const textOf = (row: { segments: ReadonlyArray<{ text: string }> } | undefined) =>
+  (row?.segments ?? []).map((segment) => segment.text).join("");
+
 describe("thread picker rows", () => {
   test("indices skip archived threads and stay stable under filtering", () => {
-    expect(threadIndex(groups).map((thread) => String(thread.id))).toEqual(["a", "c", "d"]);
+    expect(threadIndex(groups, LIST).map((thread) => String(thread.id))).toEqual(["a", "c", "d"]);
     const all = buildThreadRows(groups, {
+      ...LIST,
       query: "",
       projectId: null,
-      now: NOW,
       width: 80,
       openThreadId: null,
     });
-    expect(all.rows.map((row) => `${row.kind}:${row.key}`)).toEqual([
+    expect(rowsOf(all)).toEqual([
       "header:project:p1",
       "item:a",
-      "item:b",
       "item:c",
+      "header:archived:p1",
+      "item:b",
       "header:project:p2",
       "item:d",
     ]);
-    const text = (index: number) =>
-      (all.rows[index]?.segments ?? []).map((segment) => segment.text).join("");
-    expect(text(1)).toMatch(/^1 ● t8 step4 live/);
-    expect(text(2)).toMatch(/^- × Fix the build/);
-    expect(text(3)).toMatch(/^2 · t8 smoke test/);
-    expect(text(3)).toContain("1m");
+    expect(textOf(all.rows[1])).toMatch(/^1 ● t8 step4 live\s+working/);
+    expect(textOf(all.rows[2])).toMatch(/^2 · t8 smoke test\s+idle/);
+    expect(textOf(all.rows[2])).toContain("1m");
+    expect(textOf(all.rows[4])).toMatch(/^- × Fix the build\s+archived/);
 
     const filtered = buildThreadRows(groups, {
+      ...LIST,
       query: "smoke",
       projectId: null,
-      now: NOW,
       width: 80,
       openThreadId: null,
     });
     expect(filtered.rows.map((row) => row.key)).toEqual(["project:p1", "c"]);
-    const row = filtered.rows[1]?.segments.map((segment) => segment.text).join("") ?? "";
-    expect(row).toMatch(/^2 /);
+    expect(textOf(filtered.rows[1])).toMatch(/^2 /);
   });
 
   test("with archived threads listed, numbers still follow :b <n>", () => {
-    // Listing archived threads can reorder the groups (an archived thread was
-    // active more recently) and adds groups that only hold archived threads.
     const withArchived: ReadonlyArray<ProjectGroup> = [
       {
         projectId: "p3" as ProjectId,
@@ -286,10 +300,10 @@ describe("thread picker rows", () => {
       groups[0] as ProjectGroup,
     ];
     const built = buildThreadRows(withArchived, {
+      ...LIST,
       numbering: groups,
       query: "",
       projectId: null,
-      now: NOW,
       width: 80,
       openThreadId: null,
     });
@@ -299,22 +313,21 @@ describe("thread picker rows", () => {
         .map((row) => [row.key, row.segments[0]?.text.trim()]),
     );
     expect(numbers).toEqual({ x: "-", d: "3", a: "1", b: "-", c: "2" });
-    expect(threadIndex(groups).map((thread) => String(thread.id))).toEqual(["a", "c", "d"]);
   });
 
   test("the best match gets the cursor; project narrowing", () => {
     const built = buildThreadRows(groups, {
+      ...LIST,
       query: "landing",
       projectId: null,
-      now: NOW,
       width: 80,
       openThreadId: null,
     });
     expect(built.rows.filter((row) => row.kind === "item")[built.best]?.key).toBe("d");
     const narrowed = buildThreadRows(groups, {
+      ...LIST,
       query: "",
       projectId: "p2",
-      now: NOW,
       width: 80,
       openThreadId: null,
     });
@@ -330,6 +343,180 @@ describe("thread picker rows", () => {
       pendingRequest: {} as ThreadSummary["pendingRequest"],
     });
     expect(threadGlyph(pending).text).toBe("?");
+  });
+});
+
+// Settled / snoozed sections, the flat layout and numbering.
+const HOUR = 3_600_000;
+const sectioned: ReadonlyArray<ProjectGroup> = [
+  {
+    projectId: "p1" as ProjectId,
+    project: null,
+    title: "t8",
+    lastActivityAt: NOW,
+    threads: [
+      summary("a1", "p1", "Active one", { lastActivityAt: NOW - 1000 }),
+      summary("s1", "p1", "Settled long ago", {
+        settled: true,
+        settledAt: NOW - 5 * HOUR,
+        lastActivityAt: NOW - 2000,
+      }),
+      summary("z1", "p1", "Snoozed", {
+        snoozedUntil: NOW + 3 * HOUR,
+        snoozedAt: NOW - HOUR,
+        lastActivityAt: NOW - 3000,
+      }),
+      summary("s2", "p1", "Settled recently", {
+        settled: true,
+        settledAt: NOW - HOUR,
+        lastActivityAt: NOW - 9000,
+      }),
+      summary("a2", "p1", "Active two", { lastActivityAt: NOW - 10_000 }),
+    ],
+  },
+  {
+    projectId: "p2" as ProjectId,
+    project: null,
+    title: "website",
+    lastActivityAt: NOW - 1500,
+    threads: [
+      summary("w1", "p2", "Landing page", { lastActivityAt: NOW - 1500 }),
+      summary("w2", "p2", "Old copy", { settled: true, lastActivityAt: NOW - 20_000 }),
+    ],
+  },
+];
+const base = { query: "", projectId: null, width: 100, openThreadId: null } as const;
+
+describe("thread picker sections and layouts", () => {
+  test("grouped: active first, then a dim settled / snoozed section per project", () => {
+    const built = buildThreadRows(sectioned, { ...LIST, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:project:p1",
+      "item:a1",
+      "item:a2",
+      "header:settled:p1",
+      "item:z1",
+      "item:s2",
+      "item:s1",
+      "header:project:p2",
+      "item:w1",
+      "header:settled:p2",
+      "item:w2",
+    ]);
+    expect(textOf(built.rows[0])).toBe("t8  5");
+    expect(textOf(built.rows[3])).toBe("  settled / snoozed  3");
+    expect(built.rows[3]?.segments[0]?.fg).toBe(colors.dim);
+    expect(textOf(built.rows[4])).toMatch(/^3 · Snoozed\s+snoozed until 3h /);
+    expect(textOf(built.rows[5])).toMatch(/^4 · Settled recently\s+settled /);
+    // :b numbers follow the rows.
+    expect(threadIndex(sectioned, LIST).map((thread) => String(thread.id))).toEqual([
+      "a1",
+      "a2",
+      "z1",
+      "s2",
+      "s1",
+      "w1",
+      "w2",
+    ]);
+    const numbers = built.rows
+      .filter((row) => row.kind === "item")
+      .map((row) => row.segments[0]?.text.trim());
+    expect(numbers).toEqual(["1", "2", "3", "4", "5", "6", "7"]);
+    expect(built.hiddenSettled).toBe(0);
+  });
+
+  test("hiding settled / snoozed drops them from the rows and the numbering", () => {
+    const options = { ...LIST, showSettled: false };
+    const built = buildThreadRows(sectioned, { ...options, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:project:p1",
+      "item:a1",
+      "item:a2",
+      "header:project:p2",
+      "item:w1",
+    ]);
+    expect(built.hiddenSettled).toBe(4);
+    expect(threadIndex(sectioned, options).map((thread) => String(thread.id))).toEqual([
+      "a1",
+      "a2",
+      "w1",
+    ]);
+    expect(textOf(built.rows[4])).toMatch(/^3 /);
+    expect(
+      threadPickerFooter({
+        layout: "grouped",
+        showSettled: false,
+        showArchived: false,
+        hiddenSettled: 4,
+      }),
+    ).toBe("by project (C-g flat) · 4 settled/snoozed hidden (C-s shows)");
+  });
+
+  test("flat: most recent first across projects, settled / snoozed at the bottom", () => {
+    const options = { ...LIST, layout: "flat" } as const;
+    const built = buildThreadRows(sectioned, { ...options, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:recent",
+      "item:a1",
+      "item:w1",
+      "item:a2",
+      "header:settled",
+      "item:z1",
+      // Never given a settle time: ordered by its last activity.
+      "item:w2",
+      "item:s2",
+      "item:s1",
+    ]);
+    expect(textOf(built.rows[2])).toMatch(/^2 · Landing page\s+idle\s+website /);
+    expect(threadIndex(sectioned, options).map((thread) => String(thread.id))).toEqual([
+      "a1",
+      "w1",
+      "a2",
+      "z1",
+      "w2",
+      "s2",
+      "s1",
+    ]);
+    // Narrowing and filtering keep the numbers.
+    const narrowed = buildThreadRows(sectioned, { ...options, ...base, projectId: "p2" });
+    expect(rowsOf(narrowed)).toEqual(["header:recent", "item:w1", "header:settled", "item:w2"]);
+    expect(narrowed.rows.map((row) => row.segments[0]?.text.trim())).toEqual([
+      "All projects",
+      "2",
+      "settled / snoozed",
+      "5",
+    ]);
+    expect(
+      threadPickerFooter({
+        layout: "flat",
+        showSettled: true,
+        showArchived: true,
+        hiddenSettled: 0,
+      }),
+    ).toBe("recent first (C-g groups) · archived shown (C-a hides)");
+  });
+
+  test("a snooze that ran out or was broken by a request puts the thread back", () => {
+    const woken: ReadonlyArray<ProjectGroup> = [
+      {
+        projectId: "p1" as ProjectId,
+        project: null,
+        title: "t8",
+        lastActivityAt: NOW,
+        threads: [
+          summary("expired", "p1", "Expired", { snoozedUntil: NOW - 1, snoozedAt: NOW - HOUR }),
+          summary("asked", "p1", "Asked", {
+            snoozedUntil: NOW + HOUR,
+            snoozedAt: NOW - HOUR,
+            status: "waiting",
+            pendingRequest: { kind: "command" } as ThreadSummary["pendingRequest"],
+          }),
+        ],
+      },
+    ];
+    const built = buildThreadRows(woken, { ...LIST, ...base });
+    expect(rowsOf(built)).toEqual(["header:project:p1", "item:expired", "item:asked"]);
+    expect(textOf(built.rows[2])).toContain("approval");
   });
 });
 

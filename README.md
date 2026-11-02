@@ -99,14 +99,18 @@ approval or has a question, the input is replaced by the request so it cannot
 be missed. A banner appears under the status line while disconnected.
 
 Keys are modal, like vim. Counts work (`5j`, `3<C-f>`), as do two-key
-sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
+sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list
+(every layer and the commands, generated from the keymap tables): typing
+filters it (fuzzy, on the key, the action name and the description), `/`
+focuses the filter, `j` `k` and the arrows scroll, `Esc` clears the filter and
+then closes.
 
 | NORMAL (transcript)         |                                                   |
 | --------------------------- | ------------------------------------------------- |
 | `j` `k` / `Ctrl-e` `Ctrl-y` | scroll one line                                   |
 | `Ctrl-d` `Ctrl-u`           | scroll half a page (`Ctrl-d` never quits)         |
 | `Ctrl-f` `Ctrl-b`           | scroll a page                                     |
-| `gg` / `G`                  | top / bottom (`G` turns tail-follow back on)      |
+| `gg` or `go` / `G`          | top / bottom (`G` turns tail-follow back on)      |
 | `]]` `[[`                   | next / previous message                           |
 | `]t` `[t`                   | next / previous tool call                         |
 | `za` or `Tab` / `zM` / `zR` | fold the focused item / fold all / unfold all     |
@@ -154,55 +158,83 @@ and command ids, so the server drops a duplicate if the first try did arrive.
 command takes one (press it again to cycle). `Up` / `Down` walk the history of
 this session. An unknown command says so in the status line.
 
-| Command                 | What it does                                                   |
-| ----------------------- | -------------------------------------------------------------- |
-| `:t` `:threads [text]`  | thread picker, optionally pre-filtered                         |
-| `:p` `:projects [name]` | project switcher; with a name, that project's threads          |
-| `:n` `:new [title]`     | new thread: pick the project, then the title (empty: untitled) |
-| `:m` `:model`           | model picker for the open thread                               |
-| `:mode`                 | runtime mode picker for the open thread                        |
-| `:b` `:thread <n>`      | open thread number `n` from `:t` (a title works too)           |
-| `:bn` `:bp`             | next / previous thread in the project (like `gt` / `gT`)       |
-| `:queue`                | queued messages of the open thread                             |
-| `:archive`              | archive the open thread (asks first)                           |
-| `:a` `:approve`         | approve the pending request                                    |
-| `:d` `:deny`            | deny the pending request                                       |
-| `:reconnect`            | reconnect now; after a fatal error, try again (token re-read)  |
-| `:connect [link]`       | pair with a server, save it as a profile and switch to it      |
-| `:servers`              | saved servers (profiles); Enter switches to one                |
-| `:h` `:help`            | keys and commands                                              |
-| `:q`                    | quit; refused while a run is active in the open thread         |
-| `:qa` `:q!`             | quit anyway                                                    |
-| `:w`                    | nothing to save                                                |
+| Command                 | What it does                                                     |
+| ----------------------- | ---------------------------------------------------------------- |
+| `:t` `:threads [text]`  | thread picker, optionally pre-filtered (in the layout used last) |
+| `:r` `:recent [text]`   | thread picker, all projects in one list, most recent first       |
+| `:p` `:projects [name]` | project switcher; with a name, that project's threads            |
+| `:n` `:new [title]`     | new thread: pick the project, then the title (empty: untitled)   |
+| `:m` `:model`           | model picker for the open thread                                 |
+| `:mode`                 | runtime mode picker for the open thread                          |
+| `:b` `:thread <n>`      | open thread number `n` from `:t` (a title works too)             |
+| `:bn` `:bp`             | next / previous thread in the project (like `gt` / `gT`)         |
+| `:queue`                | queued messages of the open thread                               |
+| `:archive`              | archive the open thread (asks first)                             |
+| `:a` `:approve`         | approve the pending request                                      |
+| `:d` `:deny`            | deny the pending request                                         |
+| `:reconnect`            | reconnect now; after a fatal error, try again (token re-read)    |
+| `:connect [link]`       | pair with a server, save it as a profile and switch to it        |
+| `:servers`              | saved servers (profiles); Enter switches to one                  |
+| `:h` `:help`            | keys and commands                                                |
+| `:q`                    | quit; refused while a run is active in the open thread           |
+| `:qa` `:q!`             | quit anyway                                                      |
+| `:w`                    | nothing to save                                                  |
 
 #### Pickers
 
 Pickers open as a box over the transcript, which keeps streaming underneath.
 Typing filters (fuzzy: `t3t` finds "t8"); the best match gets the cursor.
 
-| Picker keys                     |                                                          |
-| ------------------------------- | -------------------------------------------------------- |
-| `Up` `Down` / `Ctrl-n` `Ctrl-p` | move (also `j` `k` while the filter is empty)            |
-| `Enter`                         | open / choose                                            |
-| `Esc`                           | clear the filter, then close (`Ctrl-c` closes at once)   |
-| `dd`                            | thread picker: archive; queue: cancel (both ask `y`/`n`) |
-| `J` `K`                         | queue: move the message down / up                        |
-| `Ctrl-a`                        | thread picker: show / hide archived threads              |
+| Picker keys                     |                                                             |
+| ------------------------------- | ----------------------------------------------------------- |
+| `Up` `Down` / `Ctrl-n` `Ctrl-p` | move (also `j` `k` while the filter is empty)               |
+| `Enter`                         | open / choose                                               |
+| `Esc`                           | clear the filter, then close (`Ctrl-c` closes at once)      |
+| `dd`                            | thread picker: archive; queue: cancel (both ask `y`/`n`)    |
+| `J` `K`                         | queue: move the message down / up                           |
+| `Ctrl-a`                        | thread picker: show / hide archived threads                 |
+| `Ctrl-s`                        | thread picker: show / hide settled and snoozed threads      |
+| `Ctrl-g`                        | thread picker: grouped by project / flat, most recent first |
 
 `:connect` without a link asks for it (paste it there; a link typed after
 `:connect` is not kept in the command history). Switching servers closes the
 open thread and reloads the thread list from the new server.
 
-The thread picker groups threads by project, newest activity first. Each row
-has its number (what `:b <n>` takes), a status glyph (`●` running, `?` waiting
-for an approval or answer, `·` idle, `✕` failed, `×` archived), the title, the
-project and how long ago it was active. `:n` creates the thread with the
-project's default model, else the model picked last in this session, else the
-model of the project's newest thread, else the server's default (asking with
-the model picker if there is none), and the server's default runtime mode;
-the new thread opens in INSERT. The model picker lists the server's enabled
-provider instances and their models (`server.getConfig`, cached); the current
-model is marked `●`.
+The thread picker groups threads by project, newest activity first; `Ctrl-g`
+(or `:r`) switches to one flat list of every project's threads, most recent
+first, and back. Within a project (or the flat list) the active threads come
+first, then a dim **settled / snoozed** section, then archived threads when
+`Ctrl-a` shows them; `Ctrl-s` hides the settled / snoozed section. The layout
+and both toggles are kept for the session. Each row has its number (what
+`:b <n>` takes: it counts the rows in the order shown, so it follows the
+layout and the `Ctrl-s` toggle, but not the filter), a status glyph (`●`
+running, `◌` queued, `?` waiting for an approval or answer, `·` idle, `✕`
+failed, `×` archived), the title, a status label, the project and how long ago
+it was active. The status labels, most pressing first:
+
+| Label                              | Meaning                                                           |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| `approval` / `question` (yellow)   | waiting for an approval or an answer                              |
+| `working` (green)                  | a run is preparing, starting, running or waiting                  |
+| `queued` (green)                   | a run is queued                                                   |
+| `snoozed until 3h` (dim)           | snoozed; a request or a new failure wakes it early                |
+| `failed` (red)                     | the latest run failed                                             |
+| `settled` (dim)                    | settled (by the server or a client; an un-settle keeps it active) |
+| `PR #12 ✓` / `…` / `✕` (blue, red) | linked open pull request with passing / pending / failing checks  |
+| `PR #12 merged` / `PR #12 closed`  | linked pull request that is merged / closed                       |
+| `idle`, `interrupted` (dim)        | nothing going on                                                  |
+
+Settled and snoozed follow the T3 Code web app: a thread is settled when its
+`settledOverride` is `settled`, and snoozed while `snoozedUntil` is ahead and
+neither a pending request nor a failure since the snooze has woken it; snoozed
+wins over settled. The status line shows the same label for the open thread.
+
+`:n` creates the thread with the project's default model, else the model
+picked last in this session, else the model of the project's newest thread,
+else the server's default (asking with the model picker if there is none), and
+the server's default runtime mode; the new thread opens in INSERT. The model
+picker lists the server's enabled provider instances and their models
+(`server.getConfig`, cached); the current model is marked `●`.
 
 The transcript follows new output while you are at the bottom; scrolling up
 stops that, and reaching the bottom again (or `G`, or sending) resumes it.

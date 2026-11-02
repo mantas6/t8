@@ -13,6 +13,7 @@ export const colors = {
   accent: "#c3a6ff",
   code: "#e5c07b",
   ok: "#98c379",
+  info: "#61afef",
   warn: "#e5c07b",
   error: "#ef7b8a",
   focusBg: "#232838",

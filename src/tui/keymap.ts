@@ -12,10 +12,23 @@
  * - `pickerList`: a picker with an empty filter (or none): `picker` plus `j`/`k`
  *   and the list commands (`dd`, `J`/`K`).
  * - `confirm`: a y/n question in the bottom line.
+ * - `help`: the `?` overlay while its filter has text or focus; typing goes to
+ *   the filter.
+ * - `helpList`: the `?` overlay with an empty, unfocused filter: `help` plus
+ *   `j`/`k`, `q`, `?` and `/`.
  */
 import { type Binding, type CompiledKeymap, compileKeymap } from "./keys.ts";
 
-export type Layer = "normal" | "prompt" | "insert" | "line" | "picker" | "pickerList" | "confirm";
+export type Layer =
+  | "normal"
+  | "prompt"
+  | "insert"
+  | "line"
+  | "picker"
+  | "pickerList"
+  | "confirm"
+  | "help"
+  | "helpList";
 
 export type ActionId =
   | "scroll.lineDown"
@@ -72,8 +85,17 @@ export type ActionId =
   | "picker.moveDown"
   | "picker.moveUp"
   | "picker.toggleArchived"
+  | "picker.toggleSettled"
+  | "picker.toggleLayout"
   | "confirm.yes"
-  | "confirm.no";
+  | "confirm.no"
+  | "help.down"
+  | "help.up"
+  | "help.halfDown"
+  | "help.halfUp"
+  | "help.filter"
+  | "help.cancel"
+  | "help.close";
 
 export type KeyBinding = Binding<ActionId>;
 
@@ -132,9 +154,18 @@ export const ACTION_DESCRIPTIONS: Readonly<Record<ActionId, string>> = {
   "picker.delete": "archive the thread / cancel the queued message (asks first)",
   "picker.moveDown": "move the queued message down",
   "picker.moveUp": "move the queued message up",
-  "picker.toggleArchived": "show / hide archived threads",
+  "picker.toggleArchived": "thread picker: show / hide archived threads",
+  "picker.toggleSettled": "thread picker: show / hide settled and snoozed threads",
+  "picker.toggleLayout": "thread picker: group by project / flat, most recent first",
   "confirm.yes": "yes",
   "confirm.no": "no",
+  "help.down": "scroll down",
+  "help.up": "scroll up",
+  "help.halfDown": "scroll down half a page",
+  "help.halfUp": "scroll up half a page",
+  "help.filter": "filter (typing anything else filters too)",
+  "help.cancel": "clear the filter, then close",
+  "help.close": "close",
 };
 
 const scrollWhileTyping: ReadonlyArray<KeyBinding> = [
@@ -159,6 +190,7 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<PageDown>", action: "scroll.pageDown" },
     { keys: "<PageUp>", action: "scroll.pageUp" },
     { keys: "gg", action: "scroll.top" },
+    { keys: "go", action: "scroll.top" },
     { keys: "G", action: "scroll.bottom" },
     { keys: "]]", action: "focus.nextMessage" },
     { keys: "[[", action: "focus.prevMessage" },
@@ -221,6 +253,8 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<Esc>", action: "picker.cancel" },
     { keys: "<C-c>", action: "picker.close" },
     { keys: "<C-a>", action: "picker.toggleArchived" },
+    { keys: "<C-s>", action: "picker.toggleSettled" },
+    { keys: "<C-g>", action: "picker.toggleLayout" },
   ],
   pickerList: [
     { keys: "j", action: "picker.down" },
@@ -237,6 +271,27 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<Esc>", action: "confirm.no" },
     { keys: "<C-c>", action: "confirm.no" },
   ],
+  help: [
+    { keys: "<Down>", action: "help.down" },
+    { keys: "<Up>", action: "help.up" },
+    { keys: "<C-n>", action: "help.down" },
+    { keys: "<C-p>", action: "help.up" },
+    { keys: "<C-d>", action: "help.halfDown" },
+    { keys: "<C-u>", action: "help.halfUp" },
+    { keys: "<C-f>", action: "help.halfDown" },
+    { keys: "<C-b>", action: "help.halfUp" },
+    { keys: "<PageDown>", action: "help.halfDown" },
+    { keys: "<PageUp>", action: "help.halfUp" },
+    { keys: "<Esc>", action: "help.cancel" },
+    { keys: "<C-c>", action: "help.close" },
+  ],
+  helpList: [
+    { keys: "j", action: "help.down" },
+    { keys: "k", action: "help.up" },
+    { keys: "/", action: "help.filter" },
+    { keys: "q", action: "help.close" },
+    { keys: "?", action: "help.close" },
+  ],
 };
 
 export type CompiledKeymaps = Readonly<{
@@ -249,6 +304,9 @@ export type CompiledKeymaps = Readonly<{
   /** `pickerList` layered over `picker`. */
   pickerList: CompiledKeymap<ActionId>;
   confirm: CompiledKeymap<ActionId>;
+  help: CompiledKeymap<ActionId>;
+  /** `helpList` layered over `help`. */
+  helpList: CompiledKeymap<ActionId>;
 }>;
 
 /** Compiles the keymaps; `overrides` bindings take precedence over the defaults. */
@@ -264,26 +322,38 @@ export function compileKeymaps(
     picker: compileKeymap(layer("picker")),
     pickerList: compileKeymap([...layer("pickerList"), ...layer("picker")]),
     confirm: compileKeymap(layer("confirm")),
+    help: compileKeymap(layer("help")),
+    helpList: compileKeymap([...layer("helpList"), ...layer("help")]),
   };
 }
 
+export interface HelpRow {
+  readonly keys: string;
+  /** The action id (or the command name, for commands). */
+  readonly action: string;
+  readonly description: string;
+}
+
 /** Help overlay rows: keys grouped by action, in table order. */
-export function helpRows(
-  bindings: ReadonlyArray<KeyBinding>,
-): ReadonlyArray<{ readonly keys: string; readonly description: string }> {
-  const byAction = new Map<string, { keys: string[]; description: string }>();
+export function helpRows(bindings: ReadonlyArray<KeyBinding>): ReadonlyArray<HelpRow> {
+  const byAction = new Map<string, { action: string; keys: string[]; description: string }>();
   for (const binding of bindings) {
     const id = binding.action === "request.pick" ? "request.pick" : binding.action;
     const entry = byAction.get(id);
     const keys = binding.action === "request.pick" ? "1-9" : binding.keys;
     if (entry === undefined) {
-      byAction.set(id, { keys: [keys], description: ACTION_DESCRIPTIONS[binding.action] });
+      byAction.set(id, {
+        action: binding.action,
+        keys: [keys],
+        description: ACTION_DESCRIPTIONS[binding.action],
+      });
     } else if (!entry.keys.includes(keys)) {
       entry.keys.push(keys);
     }
   }
   return [...byAction.values()].map((entry) => ({
     keys: entry.keys.join(" "),
+    action: entry.action,
     description: entry.description,
   }));
 }

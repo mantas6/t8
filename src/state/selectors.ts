@@ -21,6 +21,8 @@ import type {
   ProjectGroup,
   QueuedRun,
   ShellState,
+  ThreadSection,
+  ThreadStatus,
   ThreadSummary,
   ThreadViewState,
   ToolCallDisplayItem,
@@ -655,4 +657,129 @@ export function selectProjectGroups(
   return groups.sort(
     (a, b) => b.lastActivityAt - a.lastActivityAt || (a.projectId < b.projectId ? -1 : 1),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Thread status, settled and snoozed
+
+const ACTIVE_SHELL_STATUSES: ReadonlySet<ThreadSummary["status"]> = new Set([
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/**
+ * A request for the user or a fresh failure ends a snooze early; finished runs
+ * do not. Upstream `threadRaisedHandWhileSnoozed`
+ * (`packages/client-runtime/src/state/threadSettled.ts`).
+ */
+function raisedHandWhileSnoozed(thread: ThreadSummary): boolean {
+  if (thread.pendingRequest !== null) return true;
+  if (thread.status !== "failed") return false;
+  const failedAt = thread.latestRunCompletedAt;
+  return thread.snoozedAt === null || (failedAt !== null && failedAt > thread.snoozedAt);
+}
+
+/** Snoozed right now: the wake time is ahead and nothing woke it early (upstream `effectiveSnoozed`). */
+export function isEffectivelySnoozed(thread: ThreadSummary, now: number): boolean {
+  if (thread.snoozedUntil === null || thread.snoozedUntil <= now) return false;
+  return !raisedHandWhileSnoozed(thread);
+}
+
+/**
+ * Which part of the thread list a thread belongs in. Like the web sidebar
+ * (`resolveSidebarThreadSection`): snoozed wins over settled; everything else
+ * is active.
+ */
+export function selectThreadSection(thread: ThreadSummary, now: number): ThreadSection {
+  if (isEffectivelySnoozed(thread, now)) return "snoozed";
+  if (thread.settled) return "settled";
+  return "active";
+}
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/** Time left until `wakeAt`: `5m`, `3h`, `2d` (rounded up, like upstream `snoozeWakeLabel`). */
+export function timeUntil(wakeAt: number, now: number): string {
+  const remaining = wakeAt - now;
+  if (remaining <= 0) return "now";
+  if (remaining < HOUR_MS) return `${Math.max(1, Math.ceil(remaining / MINUTE_MS))}m`;
+  if (remaining < DAY_MS) return `${Math.ceil(remaining / HOUR_MS)}h`;
+  return `${Math.ceil(remaining / DAY_MS)}d`;
+}
+
+function pullRequestStatus(pr: NonNullable<ThreadSummary["pullRequest"]>): ThreadStatus {
+  const base = `PR #${pr.number}`;
+  if (pr.state === "merged") return { kind: "pr", label: `${base} merged`, tone: "merged" };
+  if (pr.state === "closed") return { kind: "pr", label: `${base} closed`, tone: "dim" };
+  const draft = pr.draft ? " draft" : "";
+  switch (pr.checks) {
+    case "failing":
+      return { kind: "pr", label: `${base}${draft} ✕`, tone: "error" };
+    case "pending":
+      return { kind: "pr", label: `${base}${draft} …`, tone: "info" };
+    case "passing":
+      return { kind: "pr", label: `${base}${draft} ✓`, tone: "info" };
+    default:
+      return { kind: "pr", label: `${base}${draft}`, tone: "info" };
+  }
+}
+
+/**
+ * The status label for a thread, most pressing first: archived, waiting for
+ * the user (approval / question), working, queued, snoozed, failed, settled,
+ * a linked pull request, idle. `now` (epoch ms) decides whether a snooze is
+ * still on.
+ */
+export function selectThreadStatus(thread: ThreadSummary, now: number): ThreadStatus {
+  if (thread.archived) return { kind: "archived", label: "archived", tone: "dim" };
+  const request = thread.pendingRequest;
+  if (request !== null) {
+    const label =
+      request.kind === "user_input"
+        ? "question"
+        : request.kind === "dynamic_tool_call" || request.kind === "auth_refresh"
+          ? "request"
+          : "approval";
+    return { kind: "approval", label, tone: "warn" };
+  }
+  if (ACTIVE_SHELL_STATUSES.has(thread.status)) {
+    return { kind: "working", label: "working", tone: "ok" };
+  }
+  if (thread.status === "queued") return { kind: "queued", label: "queued", tone: "ok" };
+  if (isEffectivelySnoozed(thread, now) && thread.snoozedUntil !== null) {
+    return {
+      kind: "snoozed",
+      label: `snoozed until ${timeUntil(thread.snoozedUntil, now)}`,
+      tone: "dim",
+    };
+  }
+  if (thread.status === "failed") return { kind: "failed", label: "failed", tone: "error" };
+  if (thread.settled) return { kind: "settled", label: "settled", tone: "dim" };
+  if (thread.pullRequest !== null) return pullRequestStatus(thread.pullRequest);
+  return {
+    kind: "idle",
+    label: thread.status === "interrupted" ? "interrupted" : "idle",
+    tone: "dim",
+  };
+}
+
+/**
+ * Order inside the settled / snoozed section: snoozed threads first, soonest
+ * wake first; then settled threads, most recently settled first (upstream
+ * sorts the two shelves the same way).
+ */
+export function compareSettledThreads(a: ThreadSummary, b: ThreadSummary, now: number): number {
+  const aSnoozed = isEffectivelySnoozed(a, now);
+  const bSnoozed = isEffectivelySnoozed(b, now);
+  if (aSnoozed !== bSnoozed) return aSnoozed ? -1 : 1;
+  if (aSnoozed) {
+    return (a.snoozedUntil ?? 0) - (b.snoozedUntil ?? 0) || (a.id < b.id ? -1 : 1);
+  }
+  const aAt = a.settledAt ?? a.lastActivityAt;
+  const bAt = b.settledAt ?? b.lastActivityAt;
+  return bAt - aAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }

@@ -1,6 +1,7 @@
 /**
- * Top status line: mode block, then project · branch · thread · model · run
- * status (dim), and on the right the notice / pending keys, the
+ * Top status line: mode block, then project · branch · thread · model (dim)
+ * and the thread's status label (coloured, the same label as the thread
+ * picker), and on the right the notice / pending keys, the
  * connection state and the server (profile name). When not connected a banner row is added below it.
  */
 import { type Accessor, Show } from "solid-js";
@@ -14,7 +15,10 @@ export interface StatusInfo {
   readonly branch: string | null;
   readonly title: string | null;
   readonly model: string | null;
+  /** Loading / error state of the thread view, when not ready. */
   readonly runStatus: string | null;
+  /** The thread's status label and its colour. */
+  readonly status: { readonly label: string; readonly fg: string } | null;
 }
 
 const MODE_LABEL: Readonly<Record<Mode, string>> = {
@@ -96,8 +100,14 @@ export function StatusLine(props: {
     );
     const used = MODE_LABEL[props.mode()].length + right().length + 4;
     const notice = message();
-    const room = props.width() - used - (notice === "" ? 0 : Math.min(notice.length, 48) + 2);
+    const status = info.status === null ? "" : ` · ${info.status.label}`;
+    const room =
+      props.width() - used - (notice === "" ? 0 : Math.min(notice.length, 48) + 2) - status.length;
     return truncate(` ${parts.join(" · ")}`, room);
+  };
+  const status = () => {
+    const value = props.info().status;
+    return value === null ? null : { text: ` · ${value.label}`, fg: value.fg };
   };
   const banner = () => {
     const connection = props.connection();
@@ -125,6 +135,11 @@ export function StatusLine(props: {
         </text>
         <text fg={colors.dim} flexGrow={1} wrapMode="none">
           {center()}
+          <Show when={status()}>
+            {(value: Accessor<{ text: string; fg: string }>) => (
+              <span style={{ fg: value().fg }}>{value().text}</span>
+            )}
+          </Show>
         </text>
         <Show when={message() !== ""}>
           <text fg={messageColor()} flexShrink={0} wrapMode="none">

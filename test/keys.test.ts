@@ -222,6 +222,8 @@ describe("default keymaps", () => {
 
   test("NORMAL", () => {
     expect(resolve("normal", ["g", "g"])).toBe("scroll.top");
+    expect(resolve("normal", ["g", "o"])).toBe("scroll.top");
+    expect(resolve("normal", ["g", "t"])).toBe("thread.next");
     expect(resolve("normal", ["G"])).toBe("scroll.bottom");
     expect(resolve("normal", ["<C-d>"])).toBe("scroll.halfDown");
     expect(resolve("normal", ["]", "t"])).toBe("focus.nextTool");
@@ -279,6 +281,21 @@ describe("default keymaps", () => {
     expect(resolve("insert", ["j"])).toBe("passthrough");
   });
 
+  test("thread picker toggles", () => {
+    expect(resolve("picker", ["<C-s>"])).toBe("picker.toggleSettled");
+    expect(resolve("pickerList", ["<C-s>"])).toBe("picker.toggleSettled");
+    expect(resolve("pickerList", ["<C-g>"])).toBe("picker.toggleLayout");
+    expect(resolve("pickerList", ["<C-a>"])).toBe("picker.toggleArchived");
+  });
+
+  test("help layers", () => {
+    expect(resolve("helpList", ["j"])).toBe("help.down");
+    expect(resolve("helpList", ["/"])).toBe("help.filter");
+    expect(resolve("helpList", ["<Esc>"])).toBe("help.cancel");
+    expect(resolve("help", ["j"])).toBe("passthrough");
+    expect(resolve("help", ["<Down>"])).toBe("help.down");
+  });
+
   test("overrides win over defaults", () => {
     const custom = compileKeymaps({ normal: [{ keys: "j", action: "scroll.lineUp" }] });
     const sequencer = new KeySequencer();
@@ -292,5 +309,7 @@ describe("default keymaps", () => {
       "j <Down> <C-e>",
     );
     expect(helpRows(DEFAULT_KEYMAPS.prompt).find((row) => row.keys === "1-9")).toBeDefined();
+    const top = rows.find((row) => row.action === "scroll.top");
+    expect(top?.keys).toBe("gg go");
   });
 });

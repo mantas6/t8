@@ -43,8 +43,23 @@ const SHELL = shellSnapshot(
       title: "t8 smoke test",
       latestUserMessageAt: "2026-11-02T07:00:00.000Z",
     }),
-    threadShell("thread-build", PROJECT_ID, { title: "Fix the build", status: "running" }),
+    threadShell("thread-build", PROJECT_ID, {
+      title: "Fix the build",
+      status: "running",
+      latestUserMessageAt: "2026-11-02T06:00:00.000Z",
+    }),
     threadShell("thread-landing", "project-web", { title: "Landing page copy" }),
+    // The settled / snoozed section of "website"; relative to the real clock.
+    threadShell("thread-later", "project-web", {
+      title: "Revisit pricing",
+      snoozedUntil: new Date(Date.now() + 3 * 3_600_000 - 60_000).toISOString(),
+      snoozedAt: new Date(Date.now() - 3_600_000).toISOString(),
+    }),
+    threadShell("thread-old-copy", "project-web", {
+      title: "Old copy",
+      settledOverride: "settled",
+      settledAt: "2026-11-02T06:50:00.000Z",
+    }),
   ],
 );
 
@@ -324,6 +339,80 @@ describe("App", () => {
     expect(await app.frame()).toContain("Fix the build");
     app.mockInput.pressEscape();
     expect(await app.frame()).not.toContain("Threads");
+  });
+
+  test("thread picker: status labels, settled / snoozed section, C-s, C-g and :r", async () => {
+    const app = await mount(null);
+    await app.frame();
+    const picker = await command(app, "t");
+    expect(picker).toMatch(/1 · t8 smoke test\s+idle\s+t8/);
+    expect(picker).toMatch(/2 ● Fix the build\s+working\s+t8/);
+    expect(picker).toMatch(/3 · Landing page copy\s+idle\s+website/);
+    expect(picker).toContain("settled / snoozed  2");
+    expect(picker).toMatch(/4 · Revisit pricing\s+snoozed until 3h/);
+    expect(picker).toMatch(/5 · Old copy\s+settled/);
+    expect(picker).toContain("by project (C-g flat)");
+
+    // Ctrl-S hides the section (and its numbers); the choice is kept.
+    app.mockInput.pressKey("s", { ctrl: true });
+    const hidden = await app.frame();
+    expect(hidden).not.toContain("Revisit pricing");
+    expect(hidden).toContain("2 settled/snoozed hidden (C-s shows)");
+    app.mockInput.pressEscape();
+    await app.frame();
+    expect(await command(app, "t")).not.toContain("Old copy");
+    app.mockInput.pressKey("s", { ctrl: true });
+    expect(await app.frame()).toContain("Old copy");
+
+    // Ctrl-G: flat, most recent first; numbers follow the rows, and :b uses them.
+    app.mockInput.pressKey("g", { ctrl: true });
+    const flat = await app.frame();
+    expect(flat).toContain("Threads · recent");
+    expect(flat).toContain("All projects");
+    expect(flat).toMatch(/2 · Landing page copy\s+idle\s+website/);
+    expect(flat).toMatch(/3 ● Fix the build/);
+    expect(flat).toContain("recent first (C-g groups)");
+    app.mockInput.pressEscape();
+    await app.frame();
+    await command(app, "b 2");
+    expect(app.calls.opened).toEqual(["thread-landing"]);
+    // :t opens the layout used last.
+    expect(await command(app, "t")).toContain("Threads · recent");
+    app.mockInput.pressKey("g", { ctrl: true });
+    expect(await app.frame()).not.toContain("Threads · recent");
+    app.mockInput.pressEscape();
+    await app.frame();
+    await command(app, "b 2");
+    expect(app.calls.opened).toEqual(["thread-landing", "thread-build"]);
+    // The status line shows the open thread's label.
+    expect((await app.frame()).split("\n")[0]).toContain("working");
+    // :r opens flat directly.
+    expect(await command(app, "r")).toContain("Threads · recent");
+  });
+
+  test("help: typing filters, Esc clears, then closes", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    app.mockInput.pressKey("?");
+    const all = await app.frame();
+    expect(all).toContain("NORMAL (transcript)");
+    expect(all).toContain("gg go");
+    await app.mockInput.typeText("toggleLayout");
+    const filtered = await app.frame();
+    expect(filtered).toContain("> toggleLayout");
+    expect(filtered).toContain("picker.toggleLayout");
+    expect(filtered).not.toContain("NORMAL (transcript)");
+    app.mockInput.pressEscape();
+    const cleared = await app.frame();
+    expect(cleared).toContain("NORMAL (transcript)");
+    // "/" focuses the filter, so j types instead of scrolling.
+    app.mockInput.pressKey("/");
+    app.mockInput.pressKey("j");
+    expect(await app.frame()).toContain("> j");
+    app.mockInput.pressEscape();
+    await app.frame();
+    app.mockInput.pressEscape();
+    expect(await app.frame()).not.toContain("NORMAL (transcript)");
   });
 
   test("a held-back d becomes filter text; dd archives after a confirm", async () => {

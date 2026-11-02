@@ -13,11 +13,17 @@ import type {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ShellStreamItem,
   OrchestrationV2ThreadShell,
+  ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import type { ConnectionStatus } from "../../connection/connection.ts";
-import type { ConnectionView, ShellState, ThreadSummary } from "../types.ts";
+import type {
+  ConnectionView,
+  ShellState,
+  ThreadPullRequestSummary,
+  ThreadSummary,
+} from "../types.ts";
 
 export type ShellSnapshotItem = Extract<OrchestrationV2ShellStreamItem, { kind: "snapshot" }>;
 export type ShellEventItem = Exclude<
@@ -42,6 +48,54 @@ function epochMs(value: DateTime.Utc | null | undefined): number | null {
 function preview(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > PREVIEW_LENGTH ? `${flat.slice(0, PREVIEW_LENGTH - 1)}…` : flat;
+}
+
+function parseMs(value: string | null | undefined): number {
+  const ms = value == null ? Number.NaN : Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+const isOpenLink = (link: ThreadPullRequestLink) =>
+  link.snapshot === null || link.snapshot.state === "open";
+
+/**
+ * The pull request to show for a thread. Follows upstream
+ * `resolveThreadCurrentPullRequest` (`packages/shared/src/threadPullRequests.ts`)
+ * without its stack ordering: dismissed stack members are hidden; an open one
+ * wins (the most recently linked), else the most recently updated. Falls back
+ * to the legacy `linkedPullRequest`, whose state is unknown.
+ */
+export function currentPullRequest(
+  thread: Pick<OrchestrationV2ThreadShell, "pullRequests" | "linkedPullRequest">,
+): ThreadPullRequestSummary | null {
+  const visible = (thread.pullRequests ?? []).filter((link) => link.source !== "stack-dismissed");
+  if (visible.length === 0) {
+    const legacy = thread.linkedPullRequest ?? null;
+    if (legacy === null) return null;
+    return {
+      number: legacy.number,
+      url: legacy.url,
+      repository: legacy.repository,
+      state: null,
+      draft: false,
+      checks: null,
+      others: 0,
+    };
+  }
+  const open = visible.filter(isOpenLink);
+  const pool = open.length > 0 ? open : visible;
+  const when = (link: ThreadPullRequestLink) =>
+    open.length > 0 ? parseMs(link.linkedAt) : parseMs(link.snapshot?.updatedAt ?? link.linkedAt);
+  const link = pool.reduce((best, candidate) => (when(candidate) > when(best) ? candidate : best));
+  return {
+    number: link.number,
+    url: link.url,
+    repository: link.repository,
+    state: link.snapshot?.state ?? null,
+    draft: link.snapshot?.isDraft === true,
+    checks: link.snapshot?.checksState ?? null,
+    others: visible.length - 1,
+  };
 }
 
 export function toThreadSummary(
@@ -76,6 +130,12 @@ export function toThreadSummary(
     archived: location === "archive" || thread.archivedAt !== null,
     pinned: thread.pinnedAt != null,
     pinOrderKey: thread.pinOrderKey ?? null,
+    settled: thread.settledOverride === "settled",
+    settledAt: epochMs(thread.settledAt),
+    snoozedUntil: epochMs(thread.snoozedUntil),
+    snoozedAt: epochMs(thread.snoozedAt),
+    latestRunCompletedAt: epochMs(thread.latestRunCompletedAt),
+    pullRequest: currentPullRequest(thread),
   };
 }
 

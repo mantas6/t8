@@ -41,7 +41,7 @@ import { createStore, reconcile, unwrap } from "solid-js/store";
 import { type DeliveryIntent, newCommandId, newMessageId } from "../commands.ts";
 import type { ProfileEntry } from "../connect.ts";
 import { canOperate } from "../pairing.ts";
-import { selectProjectGroups } from "../state/selectors.ts";
+import { selectProjectGroups, selectThreadStatus } from "../state/selectors.ts";
 import type {
   DisplayItem,
   PendingApproval,
@@ -80,10 +80,26 @@ import {
 } from "./components/RequestPrompt.tsx";
 import { buildServerRows, ServerPicker } from "./components/ServerPicker.tsx";
 import { type StatusInfo, StatusLine } from "./components/StatusLine.tsx";
-import { buildThreadRows, ThreadPicker, threadIndex } from "./components/ThreadPicker.tsx";
+import {
+  buildThreadRows,
+  type ThreadLayout,
+  type ThreadListOptions,
+  ThreadPicker,
+  threadIndex,
+  threadPickerFooter,
+  toneColor,
+} from "./components/ThreadPicker.tsx";
 import { Transcript, type TranscriptController } from "./components/Transcript.tsx";
 import type { RowContext, ToolResultState } from "./components/TranscriptItem.tsx";
 import { fuzzyFilter } from "./fuzzy.ts";
+import {
+  filterHelp,
+  type HelpState,
+  helpKey,
+  helpKeyWidth,
+  helpSections,
+  INITIAL_HELP_STATE,
+} from "./help.ts";
 import { type ActionId, type CompiledKeymaps, compileKeymaps, type Layer } from "./keymap.ts";
 import { type Binding, KeySequencer, keyToken } from "./keys.ts";
 import {
@@ -188,7 +204,7 @@ const FILTERED_PICKERS: ReadonlySet<View> = new Set<View>(["threads", "projects"
 
 const PICKER_HINTS: Readonly<Record<PickerView, string>> = {
   threads:
-    "type to filter · ↑↓ C-n C-p (j k) move · Enter open · dd archive · C-a archived · Esc clear/close",
+    "type to filter · ↑↓ (j k) move · Enter open · dd archive · C-g flat/grouped · C-s settled · C-a archived · Esc clear/close",
   projects: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   models: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   modes: "j k move · Enter set the mode · Esc close",
@@ -356,6 +372,13 @@ export function App(props: AppProps) {
     onCleanup(() => clearInterval(timer));
   });
 
+  // A coarse clock for relative times and snoozes in the picker and status line.
+  const [clock, setClock] = createSignal(Date.now());
+  {
+    const timer = setInterval(() => setClock(Date.now()), 30_000);
+    onCleanup(() => clearInterval(timer));
+  }
+
   const [toolResults, setToolResults] = createStore<Record<string, ToolResultState>>({});
   const loadToolResult = (item: ToolCallDisplayItem) => {
     const id = threadId();
@@ -383,12 +406,27 @@ export function App(props: AppProps) {
     const worktree = view?.worktreePath ?? null;
     const activeRun = thread.activeRun();
     let runStatus: string | null = null;
+    let status: StatusInfo["status"] = null;
     if (threadId() !== null) {
-      if (answerable() !== undefined) runStatus = "awaiting approval";
-      else if (activeRun !== null) runStatus = activeRun.status;
-      else if (thread.state.phase === "loading") runStatus = "loading";
+      if (thread.state.phase === "loading") runStatus = "loading";
       else if (thread.state.phase === "error") runStatus = "error";
-      else runStatus = current?.status ?? null;
+      const shellStatus = current === undefined ? null : selectThreadStatus(current, clock());
+      // The open thread's own stream can be ahead of the shell's summary.
+      const request = answerable();
+      if (request !== undefined && shellStatus?.kind !== "approval") {
+        status = {
+          label: request.type === "approval" ? "approval" : "question",
+          fg: colors.warn,
+        };
+      } else if (
+        activeRun !== null &&
+        shellStatus?.kind !== "approval" &&
+        shellStatus?.kind !== "working"
+      ) {
+        status = { label: "working", fg: colors.ok };
+      } else if (shellStatus !== null) {
+        status = { label: shellStatus.label, fg: toneColor(shellStatus.tone) };
+      }
     }
     return {
       project: projectId === undefined ? null : (shell.state.projects[projectId]?.title ?? null),
@@ -399,6 +437,7 @@ export function App(props: AppProps) {
       title: view?.title ?? current?.title ?? null,
       model: current?.model ?? null,
       runStatus,
+      status,
     };
   };
 
@@ -876,6 +915,15 @@ export function App(props: AppProps) {
 
   const ask = (message: string, onYes: () => void) => ui.setConfirm({ message, onYes });
 
+  // Help overlay: its filter starts empty each time it opens.
+  const allHelpSections = helpSections();
+  const [helpState, setHelpState] = createSignal<HelpState>(INITIAL_HELP_STATE);
+  const helpShown = createMemo(() => filterHelp(allHelpSections, helpState().filter));
+  const openHelp = () => {
+    setHelpState(INITIAL_HELP_STATE);
+    ui.setView("help");
+  };
+
   // Picker state. The cursor is remembered by row key so it stays on the same
   // entry while the list changes underneath (streaming status, new threads).
   const [pickerFilter, setPickerFilter] = createSignal("");
@@ -883,6 +931,14 @@ export function App(props: AppProps) {
   const [cursorKey, setCursorKey] = createSignal<string | null>(null);
   const [threadProject, setThreadProject] = createSignal<ProjectId | null>(null);
   const [showArchived, setShowArchived] = createSignal(false);
+  /** Thread picker choices, kept for the session: settled / snoozed shown, and the layout. */
+  const [showSettled, setShowSettled] = createSignal(true);
+  const [threadLayout, setThreadLayout] = createSignal<ThreadLayout>("grouped");
+  const listOptions = (): ThreadListOptions => ({
+    layout: threadLayout(),
+    showSettled: showSettled(),
+    now: clock(),
+  });
   const [projectPurpose, setProjectPurpose] = createSignal<"narrow" | "new">("narrow");
   const [modelPurpose, setModelPurpose] = createSignal<"set" | "new">("set");
   const [draft, setDraft] = createSignal<NewThreadDraft | null>(null);
@@ -903,7 +959,15 @@ export function App(props: AppProps) {
       const state = unwrap(shell.state);
       const threads: Record<string, ThreadSummary> = { ...state.threads };
       for (const entry of extra) threads[entry.id] ??= entry;
-      return selectProjectGroups({ ...state, threads }, { includeArchived: true });
+      const all = selectProjectGroups({ ...state, threads }, { includeArchived: true });
+      // Keep the projects where they are without archived threads, so the
+      // rows stay in `:b <n>` order; projects with only archived threads go last.
+      const order = new Map(groups.map((group, index) => [group.projectId as string, index]));
+      const rank = (group: ProjectGroup) => order.get(group.projectId) ?? groups.length;
+      return all
+        .map((group, index) => ({ group, index }))
+        .sort((a, b) => rank(a.group) - rank(b.group) || a.index - b.index)
+        .map((entry) => entry.group);
     });
   });
 
@@ -923,20 +987,28 @@ export function App(props: AppProps) {
   const currentModel = (): ModelSelection | null =>
     thread.state.thread?.modelSelection ?? summary()?.modelSelection ?? null;
 
+  const threadRows = createMemo(() =>
+    ui.view() === "threads"
+      ? buildThreadRows(pickerGroups(), {
+          ...listOptions(),
+          numbering: shell.groups(),
+          query: pickerFilter(),
+          projectId: threadProject(),
+          width: pickerWidth(),
+          openThreadId: threadId(),
+        })
+      : null,
+  );
+
   const pickerList = createMemo((): { rows: ReadonlyArray<PickerRow>; initial: number } => {
     const view = ui.view();
     const query = pickerFilter();
     switch (view) {
       case "threads": {
-        const built = buildThreadRows(pickerGroups(), {
-          numbering: shell.groups(),
-          query,
-          projectId: threadProject(),
-          now: Date.now(),
-          width: pickerWidth(),
-          openThreadId: threadId(),
-        });
-        return { rows: built.rows, initial: built.best };
+        const built = threadRows();
+        return built === null
+          ? { rows: [], initial: 0 }
+          : { rows: built.rows, initial: built.best };
       }
       case "projects":
         return {
@@ -1061,7 +1133,12 @@ export function App(props: AppProps) {
       },
     );
 
-  const openThreadPicker = (filter = "", projectId: ProjectId | null = null) => {
+  const openThreadPicker = (
+    filter = "",
+    projectId: ProjectId | null = null,
+    layout: ThreadLayout | null = null,
+  ) => {
+    if (layout !== null) setThreadLayout(layout);
     setThreadProject(projectId);
     openPicker("threads", filter, threadId());
   };
@@ -1378,7 +1455,7 @@ export function App(props: AppProps) {
   // Commands ---------------------------------------------------------------
 
   const jumpToThread = (target: number | string) => {
-    const list = threadIndex(shell.groups());
+    const list = threadIndex(shell.groups(), listOptions());
     let found: ThreadSummary | undefined;
     if (typeof target === "number") {
       found = list[target - 1];
@@ -1413,7 +1490,7 @@ export function App(props: AppProps) {
   };
 
   const completionSources = (): CompletionSources => ({
-    threads: threadIndex(shell.groups()).map((candidate) => candidate.title),
+    threads: threadIndex(shell.groups(), listOptions()).map((candidate) => candidate.title),
     projects: shell.groups().map((group) => group.title),
   });
 
@@ -1468,7 +1545,7 @@ export function App(props: AppProps) {
         deny();
         return;
       case "threads":
-        openThreadPicker(command.filter);
+        openThreadPicker(command.filter, null, command.layout);
         return;
       case "projects":
         if (command.name === "") openProjectPicker("narrow");
@@ -1496,7 +1573,7 @@ export function App(props: AppProps) {
         openQueue();
         return;
       case "help":
-        ui.setView("help");
+        openHelp();
         return;
       case "archive": {
         const id = threadId();
@@ -1642,7 +1719,7 @@ export function App(props: AppProps) {
       case "command.open":
         return openLine("command");
       case "help.open":
-        return ui.setView("help");
+        return openHelp();
       case "app.ctrlC":
         return ctrlC();
       case "request.approve":
@@ -1701,6 +1778,31 @@ export function App(props: AppProps) {
       case "picker.toggleArchived":
         if (ui.view() === "threads") toggleArchived();
         return;
+      case "picker.toggleSettled":
+        if (ui.view() !== "threads") return;
+        setShowSettled((shown) => !shown);
+        notice(
+          showSettled()
+            ? "settled and snoozed threads shown"
+            : "settled and snoozed threads hidden",
+        );
+        return;
+      case "picker.toggleLayout":
+        if (ui.view() !== "threads") return;
+        setThreadLayout((layout) => (layout === "flat" ? "grouped" : "flat"));
+        notice(
+          threadLayout() === "flat" ? "all projects, most recent first" : "grouped by project",
+        );
+        return;
+      case "help.down":
+      case "help.up":
+      case "help.halfDown":
+      case "help.halfUp":
+      case "help.filter":
+      case "help.cancel":
+      case "help.close":
+        // Handled by `helpKey` while the overlay is open.
+        return;
       case "confirm.yes":
         return confirmAnswer(true);
       case "confirm.no":
@@ -1723,28 +1825,18 @@ export function App(props: AppProps) {
   };
 
   const handleHelpKey = (token: string) => {
-    switch (token) {
-      case "<Esc>":
-      case "q":
-      case "?":
-      case "<C-c>":
+    const before = helpState();
+    const result = helpKey(before, token, keymaps);
+    setHelpState(result.state);
+    if (result.state.filter !== before.filter) helpScroll?.scrollTo(0);
+    switch (result.effect.type) {
+      case "close":
         ui.setView("transcript");
         return;
-      case "j":
-      case "<Down>":
-        helpScroll?.scrollBy(1);
-        return;
-      case "k":
-      case "<Up>":
-        helpScroll?.scrollBy(-1);
-        return;
-      case "<C-d>":
-      case "<C-f>":
-        helpScroll?.scrollBy(0.5, "viewport");
-        return;
-      case "<C-u>":
-      case "<C-b>":
-        helpScroll?.scrollBy(-0.5, "viewport");
+      case "scroll":
+        if (result.effect.unit === "viewport")
+          helpScroll?.scrollBy(result.effect.amount, "viewport");
+        else helpScroll?.scrollBy(result.effect.amount);
         return;
     }
   };
@@ -1931,7 +2023,15 @@ export function App(props: AppProps) {
                 ? null
                 : (shell.state.projects[projectId]?.title ?? projectId);
             }}
-            showArchived={showArchived}
+            layout={threadLayout}
+            footer={() =>
+              threadPickerFooter({
+                layout: threadLayout(),
+                showSettled: showSettled(),
+                showArchived: showArchived(),
+                hiddenSettled: threadRows()?.hiddenSettled ?? 0,
+              })
+            }
             initialFilter={untrack(pickerFilter)}
             onFilter={onFilter}
             inputRef={(element) => {
@@ -2001,6 +2101,10 @@ export function App(props: AppProps) {
           ref={(element) => {
             helpScroll = element;
           }}
+          sections={helpShown}
+          filter={() => helpState().filter}
+          focused={() => helpState().focused}
+          keyWidth={helpKeyWidth(allHelpSections)}
         />
       </Show>
     </box>

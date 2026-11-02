@@ -1,13 +1,26 @@
 /**
- * `:t` thread picker: threads grouped by project (newest activity first),
- * one row each with its picker index (for `:b <n>`), a status glyph, title,
- * project and relative time. Typing filters fuzzily on title and project;
- * the groups keep their order and the best match gets the cursor.
+ * `:t` thread picker. Two layouts, remembered for the session:
+ *
+ * - `grouped`: threads grouped by project (newest activity first); inside a
+ *   project the active threads come first, then a dim "settled / snoozed"
+ *   section, then archived threads (when shown).
+ * - `flat`: every project's threads in one list, most recent first, with the
+ *   same settled / snoozed and archived sections at the bottom.
+ *
+ * One row per thread: its number (what `:b <n>` takes, counted in the order
+ * shown), a status glyph, the title, a status label, the project and the
+ * relative time. Typing filters fuzzily on title and project; the order stays
+ * and the best match gets the cursor.
  */
 import type { InputRenderable } from "@opentui/core";
 import type { Accessor } from "solid-js";
 
-import type { ProjectGroup, ThreadSummary } from "../../state/types.ts";
+import {
+  compareSettledThreads,
+  selectThreadSection,
+  selectThreadStatus,
+} from "../../state/selectors.ts";
+import type { ProjectGroup, StatusTone, ThreadSummary } from "../../state/types.ts";
 import { fuzzyMatch } from "../fuzzy.ts";
 import { fit, highlight, type PickerRow, relativeTime, type Segment } from "../picker.ts";
 import { colors } from "../theme.ts";
@@ -25,15 +38,145 @@ export function threadGlyph(thread: ThreadSummary): { readonly text: string; rea
   return { text: "·", fg: colors.dim };
 }
 
-/**
- * Non-archived threads in picker order: what `:b <n>` counts. Indices are
- * 1-based and do not change with the filter or project narrowing.
- */
-export function threadIndex(groups: ReadonlyArray<ProjectGroup>): ReadonlyArray<ThreadSummary> {
-  return groups.flatMap((group) => group.threads.filter((thread) => !thread.archived));
+/** The colour for a status tone. */
+export function toneColor(tone: StatusTone): string {
+  switch (tone) {
+    case "ok":
+      return colors.ok;
+    case "warn":
+      return colors.warn;
+    case "error":
+      return colors.error;
+    case "info":
+      return colors.info;
+    case "merged":
+      return colors.accent;
+    case "dim":
+      return colors.dim;
+  }
 }
 
-export interface ThreadRowsOptions {
+export type ThreadLayout = "grouped" | "flat";
+
+export interface ThreadListOptions {
+  readonly layout: ThreadLayout;
+  /** List settled and snoozed threads (in their own section). */
+  readonly showSettled: boolean;
+  /** Epoch ms: decides whether a snooze is still on. */
+  readonly now: number;
+}
+
+export interface ThreadBlock {
+  readonly key: string;
+  /** `project`: a project's active threads; `recent`: everything active, flat. */
+  readonly kind: "project" | "recent" | "settled" | "archived";
+  readonly title: string;
+  /** The project a grouped block belongs to; null in the flat layout. */
+  readonly projectId: string | null;
+  readonly threads: ReadonlyArray<ThreadSummary>;
+}
+
+const byActivity = (a: ThreadSummary, b: ThreadSummary) =>
+  b.lastActivityAt - a.lastActivityAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
+/** Splits threads (already in display order) into active, settled / snoozed and archived. */
+function partition(
+  threads: ReadonlyArray<ThreadSummary>,
+  options: ThreadListOptions,
+): { active: ThreadSummary[]; settled: ThreadSummary[]; archived: ThreadSummary[] } {
+  const active: ThreadSummary[] = [];
+  const settled: ThreadSummary[] = [];
+  const archived: ThreadSummary[] = [];
+  for (const thread of threads) {
+    if (thread.archived) archived.push(thread);
+    else if (selectThreadSection(thread, options.now) === "active") active.push(thread);
+    else if (options.showSettled) settled.push(thread);
+  }
+  settled.sort((a, b) => compareSettledThreads(a, b, options.now));
+  return { active, settled, archived };
+}
+
+/** The thread list in display order, as blocks (each gets a header row). */
+export function threadBlocks(
+  groups: ReadonlyArray<ProjectGroup>,
+  options: ThreadListOptions,
+): ReadonlyArray<ThreadBlock> {
+  const blocks: ThreadBlock[] = [];
+  const push = (block: ThreadBlock) => {
+    if (block.threads.length > 0) blocks.push(block);
+  };
+  if (options.layout === "flat") {
+    const all = groups.flatMap((group) => group.threads).sort(byActivity);
+    const { active, settled, archived } = partition(all, options);
+    push({
+      key: "recent",
+      kind: "recent",
+      title: "All projects",
+      projectId: null,
+      threads: active,
+    });
+    push({
+      key: "settled",
+      kind: "settled",
+      title: "settled / snoozed",
+      projectId: null,
+      threads: settled,
+    });
+    push({
+      key: "archived",
+      kind: "archived",
+      title: "archived",
+      projectId: null,
+      threads: archived,
+    });
+    return blocks;
+  }
+  for (const group of groups) {
+    const { active, settled, archived } = partition(group.threads, options);
+    const id = group.projectId;
+    // A project header even when only its settled / archived sections have threads.
+    if (active.length > 0 || settled.length > 0 || archived.length > 0) {
+      blocks.push({
+        key: `project:${id}`,
+        kind: "project",
+        title: group.title,
+        projectId: id,
+        threads: active,
+      });
+    }
+    push({
+      key: `settled:${id}`,
+      kind: "settled",
+      title: "settled / snoozed",
+      projectId: id,
+      threads: settled,
+    });
+    push({
+      key: `archived:${id}`,
+      kind: "archived",
+      title: "archived",
+      projectId: id,
+      threads: archived,
+    });
+  }
+  return blocks;
+}
+
+/**
+ * Non-archived threads in the order the picker shows them: what `:b <n>`
+ * counts. Indices are 1-based and do not change with the filter or project
+ * narrowing, only with the layout and whether settled threads are shown.
+ */
+export function threadIndex(
+  groups: ReadonlyArray<ProjectGroup>,
+  options: ThreadListOptions,
+): ReadonlyArray<ThreadSummary> {
+  return threadBlocks(groups, options).flatMap((block) =>
+    block.threads.filter((thread) => !thread.archived),
+  );
+}
+
+export interface ThreadRowsOptions extends ThreadListOptions {
   /**
    * The groups row numbers are counted in (what `:b <n>` uses), when the rows
    * come from a different list, e.g. one that also holds archived threads.
@@ -43,7 +186,6 @@ export interface ThreadRowsOptions {
   readonly query: string;
   /** Only this project's threads. */
   readonly projectId: string | null;
-  readonly now: number;
   /** Inner width of the picker, for the columns. */
   readonly width: number;
   readonly openThreadId: string | null;
@@ -53,50 +195,119 @@ export interface ThreadRows {
   readonly rows: ReadonlyArray<PickerRow<ThreadSummary>>;
   /** Selectable index of the best match (0 without a query). */
   readonly best: number;
+  /** Settled / snoozed threads left out because the section is hidden. */
+  readonly hiddenSettled: number;
 }
 
 const PROJECT_WIDTH = 16;
 const TIME_WIDTH = 4;
+const MAX_STATUS_WIDTH = 18;
+
+interface Match {
+  readonly thread: ThreadSummary;
+  readonly projectTitle: string;
+  readonly positions: ReadonlyArray<number>;
+  readonly score: number;
+}
 
 export function buildThreadRows(
   groups: ReadonlyArray<ProjectGroup>,
   options: ThreadRowsOptions,
 ): ThreadRows {
+  const blocks = threadBlocks(groups, options);
   const numbers = new Map<string, number>();
-  threadIndex(options.numbering ?? groups).forEach((thread, index) => {
+  const numbered = threadIndex(options.numbering ?? groups, options);
+  numbered.forEach((thread, index) => {
     numbers.set(thread.id, index + 1);
   });
-  const digits = Math.max(1, String(numbers.size).length);
+  const count = numbered.length;
+  const projectTitles = new Map(groups.map((group) => [group.projectId as string, group.title]));
+  const query = options.query.trim();
+
+  // Filter first, so the columns fit what is shown.
+  const matched: Array<{ block: ThreadBlock; matches: Match[] }> = [];
+  for (const block of blocks) {
+    if (
+      options.projectId !== null &&
+      block.projectId !== null &&
+      block.projectId !== options.projectId
+    ) {
+      continue;
+    }
+    const matches: Match[] = [];
+    for (const thread of block.threads) {
+      if (options.projectId !== null && thread.projectId !== options.projectId) continue;
+      const projectTitle = projectTitles.get(thread.projectId) ?? thread.projectId;
+      const match = fuzzyMatch(query, `${thread.title} ${projectTitle}`);
+      if (match === null) continue;
+      matches.push({ thread, projectTitle, positions: match.positions, score: match.score });
+    }
+    matched.push({ block, matches });
+  }
+
+  const statuses = new Map(
+    matched.flatMap(({ matches }) =>
+      matches.map(({ thread }) => [thread.id, selectThreadStatus(thread, options.now)] as const),
+    ),
+  );
+  const statusWidth = Math.min(
+    MAX_STATUS_WIDTH,
+    Math.max(6, ...[...statuses.values()].map((status) => status.label.length)),
+  );
+  const digits = Math.max(1, String(count).length);
   const titleWidth = Math.max(
     10,
-    options.width - (digits + 1) - 2 - 1 - PROJECT_WIDTH - 1 - TIME_WIDTH,
+    options.width - (digits + 1) - 2 - 1 - statusWidth - 1 - PROJECT_WIDTH - 1 - TIME_WIDTH,
   );
-  const query = options.query.trim();
+
   const rows: PickerRow<ThreadSummary>[] = [];
   let best = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   let selectable = 0;
-  for (const group of groups) {
-    if (options.projectId !== null && group.projectId !== options.projectId) continue;
-    const matches: Array<{ thread: ThreadSummary; positions: ReadonlyArray<number> }> = [];
-    for (const thread of group.threads) {
-      const match = fuzzyMatch(query, `${thread.title} ${group.title}`);
-      if (match === null) continue;
-      if (query !== "" && match.score > bestScore) {
-        bestScore = match.score;
-        best = selectable + matches.length;
-      }
-      matches.push({ thread, positions: match.positions });
+  // Grouped: a project header only when the project has a match somewhere.
+  const projectHasMatches = new Map<string, number>();
+  for (const { block, matches } of matched) {
+    if (block.projectId === null) continue;
+    projectHasMatches.set(
+      block.projectId,
+      (projectHasMatches.get(block.projectId) ?? 0) + matches.length,
+    );
+  }
+  for (const { block, matches } of matched) {
+    const isProject = block.kind === "project";
+    if (isProject) {
+      const total = projectHasMatches.get(block.projectId ?? "") ?? 0;
+      if (total === 0) continue;
+      rows.push({
+        key: block.key,
+        kind: "header",
+        segments: [{ text: block.title }, { text: `  ${total}`, fg: colors.faint }],
+      });
+    } else {
+      if (matches.length === 0) continue;
+      const indent = block.projectId === null ? "" : "  ";
+      rows.push({
+        key: block.key,
+        kind: "header",
+        segments: [
+          {
+            text: `${indent}${block.title}`,
+            fg: block.kind === "recent" ? colors.accent : colors.dim,
+          },
+          { text: `  ${matches.length}`, fg: colors.faint },
+        ],
+      });
     }
-    if (matches.length === 0) continue;
-    rows.push({
-      key: `project:${group.projectId}`,
-      kind: "header",
-      segments: [{ text: `${group.title}` }, { text: `  ${matches.length}`, fg: colors.faint }],
-    });
-    for (const { thread, positions } of matches) {
+    const quiet = block.kind === "settled" || block.kind === "archived";
+    for (const { thread, projectTitle, positions, score } of matches) {
+      if (query !== "" && score > bestScore) {
+        bestScore = score;
+        best = selectable;
+      }
+      selectable += 1;
       const number = numbers.get(thread.id);
       const glyph = threadGlyph(thread);
+      const status = statuses.get(thread.id) ?? selectThreadStatus(thread, options.now);
       const open = thread.id === options.openThreadId;
       const title = fit(thread.title, titleWidth);
       const shown = thread.title.length > titleWidth ? titleWidth - 1 : thread.title.length;
@@ -109,10 +320,11 @@ export function buildThreadRows(
         ...highlight(
           title,
           positions.filter((position) => position < shown),
-          thread.archived ? colors.dim : open ? colors.user : colors.fg,
+          open ? colors.user : quiet ? colors.dim : colors.fg,
           colors.match,
         ),
-        { text: ` ${fit(group.title, PROJECT_WIDTH)}`, fg: colors.dim },
+        { text: ` ${fit(status.label, statusWidth)}`, fg: toneColor(status.tone) },
+        { text: ` ${fit(projectTitle, PROJECT_WIDTH)}`, fg: colors.dim },
         {
           text: ` ${relativeTime(thread.lastActivityAt, options.now).padStart(TIME_WIDTH)}`,
           fg: colors.dim,
@@ -120,16 +332,47 @@ export function buildThreadRows(
       ];
       rows.push({ key: thread.id, kind: "item", segments, value: thread });
     }
-    selectable += matches.length;
   }
-  return { rows, best };
+
+  let hiddenSettled = 0;
+  if (!options.showSettled) {
+    for (const group of groups) {
+      if (options.projectId !== null && group.projectId !== options.projectId) continue;
+      for (const thread of group.threads) {
+        if (!thread.archived && selectThreadSection(thread, options.now) !== "active") {
+          hiddenSettled += 1;
+        }
+      }
+    }
+  }
+  return { rows, best, hiddenSettled };
+}
+
+/** The dim line under the thread list: what is hidden or shown, and the keys for it. */
+export function threadPickerFooter(state: {
+  readonly layout: ThreadLayout;
+  readonly showSettled: boolean;
+  readonly showArchived: boolean;
+  readonly hiddenSettled: number;
+}): string {
+  const parts = [state.layout === "flat" ? "recent first (C-g groups)" : "by project (C-g flat)"];
+  if (!state.showSettled) {
+    parts.push(
+      state.hiddenSettled > 0
+        ? `${state.hiddenSettled} settled/snoozed hidden (C-s shows)`
+        : "settled hidden (C-s shows)",
+    );
+  }
+  if (state.showArchived) parts.push("archived shown (C-a hides)");
+  return parts.join(" · ");
 }
 
 export function ThreadPicker(props: {
   readonly rows: Accessor<ReadonlyArray<PickerRow>>;
   readonly cursorRow: Accessor<number>;
   readonly projectTitle: Accessor<string | null>;
-  readonly showArchived: Accessor<boolean>;
+  readonly layout: Accessor<ThreadLayout>;
+  readonly footer: Accessor<string>;
   readonly initialFilter: string;
   readonly onFilter: (value: string) => void;
   readonly inputRef: (element: InputRenderable) => void;
@@ -137,8 +380,9 @@ export function ThreadPicker(props: {
   readonly height: Accessor<number>;
 }) {
   const title = () => {
+    const base = props.layout() === "flat" ? "Threads · recent" : "Threads";
     const project = props.projectTitle();
-    return project === null ? "Threads" : `Threads · ${project}`;
+    return project === null ? base : `${base} · ${project}`;
   };
   return (
     <Picker
@@ -149,7 +393,7 @@ export function ThreadPicker(props: {
       width={props.width}
       height={props.height}
       filter={{ ref: props.inputRef, onInput: props.onFilter, initial: props.initialFilter }}
-      footer={() => (props.showArchived() ? "archived threads shown (Ctrl-A hides them)" : null)}
+      footer={props.footer}
     />
   );
 }
