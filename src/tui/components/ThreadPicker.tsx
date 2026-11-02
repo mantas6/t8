@@ -11,12 +11,20 @@
  * shown), a status glyph, the title, a status label, the project and the
  * relative time. Typing filters fuzzily on title and project; the order stays
  * and the best match gets the cursor.
+ *
+ * Subagent threads (delegated child tasks) are hidden by default, like in the
+ * web app; a request waiting in one shows on its parent (`↳ approval`). When
+ * shown they never get a number: grouped, they sit indented under their parent;
+ * flat, they carry a dim `↳ <parent>` hint.
  */
 import type { InputRenderable } from "@opentui/core";
 import type { Accessor } from "solid-js";
 
 import {
   compareSettledThreads,
+  isSubagentThread,
+  resolveRowThreadId,
+  SUBAGENT_MARK,
   selectThreadSection,
   selectThreadStatus,
 } from "../../state/selectors.ts";
@@ -31,7 +39,9 @@ const ACTIVE = new Set(["preparing", "starting", "running", "waiting"]);
 /** Status glyph: awaiting approval, running, failed, archived, or idle. */
 export function threadGlyph(thread: ThreadSummary): { readonly text: string; readonly fg: string } {
   if (thread.archived) return { text: "×", fg: colors.faint };
-  if (thread.pendingRequest !== null) return { text: "?", fg: colors.warn };
+  if (thread.pendingRequest !== null || thread.pendingSubagentRequest !== null) {
+    return { text: "?", fg: colors.warn };
+  }
   if (ACTIVE.has(thread.status)) return { text: "●", fg: colors.ok };
   if (thread.status === "queued") return { text: "◌", fg: colors.ok };
   if (thread.status === "failed") return { text: "✕", fg: colors.error };
@@ -62,6 +72,8 @@ export interface ThreadListOptions {
   readonly layout: ThreadLayout;
   /** List settled and snoozed threads (in their own section). */
   readonly showSettled: boolean;
+  /** List subagent threads (never numbered). Default false. */
+  readonly showSubagents?: boolean;
   /** Epoch ms: decides whether a snooze is still on. */
   readonly now: number;
 }
@@ -74,6 +86,8 @@ export interface ThreadBlock {
   /** The project a grouped block belongs to; null in the flat layout. */
   readonly projectId: string | null;
   readonly threads: ReadonlyArray<ThreadSummary>;
+  /** Grouped layout: how deep each listed subagent sits under its parent row. */
+  readonly depths?: ReadonlyMap<string, number>;
 }
 
 const byActivity = (a: ThreadSummary, b: ThreadSummary) =>
@@ -96,6 +110,55 @@ function partition(
   return { active, settled, archived };
 }
 
+/**
+ * Grouped layout: a project's threads with each subagent moved under its
+ * parent. The parent's row decides the section; a subagent whose parent is not
+ * listed (archived and hidden, unknown, a cycle) stands on its own.
+ */
+function nestSubagents(threads: ReadonlyArray<ThreadSummary>): {
+  readonly roots: ReadonlyArray<ThreadSummary>;
+  readonly expand: (list: ReadonlyArray<ThreadSummary>) => {
+    threads: ThreadSummary[];
+    depths: Map<string, number>;
+  };
+} {
+  const byId: Record<string, ThreadSummary> = {};
+  for (const thread of threads) byId[thread.id] = thread;
+  const isRoot = (thread: ThreadSummary) => {
+    if (!isSubagentThread(thread)) return true;
+    const row = resolveRowThreadId(thread.id, byId);
+    return row === thread.id || byId[row] === undefined;
+  };
+  const roots: ThreadSummary[] = [];
+  const children = new Map<string, ThreadSummary[]>();
+  for (const thread of threads) {
+    if (isRoot(thread)) {
+      roots.push(thread);
+      continue;
+    }
+    const parentId = thread.parentThreadId as string;
+    const list = children.get(parentId) ?? [];
+    list.push(thread);
+    children.set(parentId, list);
+  }
+  for (const list of children.values()) list.sort(byActivity);
+  const expand = (list: ReadonlyArray<ThreadSummary>) => {
+    const out: ThreadSummary[] = [];
+    const depths = new Map<string, number>();
+    const emitted = new Set<string>();
+    const visit = (thread: ThreadSummary, depth: number) => {
+      if (emitted.has(thread.id)) return;
+      emitted.add(thread.id);
+      out.push(thread);
+      if (depth > 0) depths.set(thread.id, depth);
+      for (const child of children.get(thread.id) ?? []) visit(child, depth + 1);
+    };
+    for (const thread of list) visit(thread, 0);
+    return { threads: out, depths };
+  };
+  return { roots, expand };
+}
+
 /** The thread list in display order, as blocks (each gets a header row). */
 export function threadBlocks(
   groups: ReadonlyArray<ProjectGroup>,
@@ -105,8 +168,12 @@ export function threadBlocks(
   const push = (block: ThreadBlock) => {
     if (block.threads.length > 0) blocks.push(block);
   };
+  const listed = (threads: ReadonlyArray<ThreadSummary>) =>
+    options.showSubagents === true
+      ? threads
+      : threads.filter((thread) => !isSubagentThread(thread));
   if (options.layout === "flat") {
-    const all = groups.flatMap((group) => group.threads).sort(byActivity);
+    const all = groups.flatMap((group) => listed(group.threads)).sort(byActivity);
     const { active, settled, archived } = partition(all, options);
     push({
       key: "recent",
@@ -132,16 +199,21 @@ export function threadBlocks(
     return blocks;
   }
   for (const group of groups) {
-    const { active, settled, archived } = partition(group.threads, options);
+    const { roots, expand } = nestSubagents(listed(group.threads));
+    const sections = partition(roots, options);
+    const active = expand(sections.active);
+    const settled = expand(sections.settled);
+    const archived = expand(sections.archived);
     const id = group.projectId;
     // A project header even when only its settled / archived sections have threads.
-    if (active.length > 0 || settled.length > 0 || archived.length > 0) {
+    if (active.threads.length > 0 || settled.threads.length > 0 || archived.threads.length > 0) {
       blocks.push({
         key: `project:${id}`,
         kind: "project",
         title: group.title,
         projectId: id,
-        threads: active,
+        threads: active.threads,
+        depths: active.depths,
       });
     }
     push({
@@ -149,29 +221,32 @@ export function threadBlocks(
       kind: "settled",
       title: "settled / snoozed",
       projectId: id,
-      threads: settled,
+      threads: settled.threads,
+      depths: settled.depths,
     });
     push({
       key: `archived:${id}`,
       kind: "archived",
       title: "archived",
       projectId: id,
-      threads: archived,
+      threads: archived.threads,
+      depths: archived.depths,
     });
   }
   return blocks;
 }
 
 /**
- * Non-archived threads in the order the picker shows them: what `:b <n>`
- * counts. Indices are 1-based and do not change with the filter or project
- * narrowing, only with the layout and whether settled threads are shown.
+ * Non-archived, non-subagent threads in the order the picker shows them: what
+ * `:b <n>` counts. Indices are 1-based and do not change with the filter,
+ * project narrowing or whether subagents are shown, only with the layout and
+ * whether settled threads are shown.
  */
 export function threadIndex(
   groups: ReadonlyArray<ProjectGroup>,
   options: ThreadListOptions,
 ): ReadonlyArray<ThreadSummary> {
-  return threadBlocks(groups, options).flatMap((block) =>
+  return threadBlocks(groups, { ...options, showSubagents: false }).flatMap((block) =>
     block.threads.filter((thread) => !thread.archived),
   );
 }
@@ -197,6 +272,8 @@ export interface ThreadRows {
   readonly best: number;
   /** Settled / snoozed threads left out because the section is hidden. */
   readonly hiddenSettled: number;
+  /** Subagent threads left out because they are hidden. */
+  readonly hiddenSubagents: number;
 }
 
 const PROJECT_WIDTH = 16;
@@ -222,6 +299,9 @@ export function buildThreadRows(
   });
   const count = numbered.length;
   const projectTitles = new Map(groups.map((group) => [group.projectId as string, group.title]));
+  const titles = new Map<string, string>();
+  for (const group of groups)
+    for (const thread of group.threads) titles.set(thread.id, thread.title);
   const query = options.query.trim();
 
   // Filter first, so the columns fit what is shown.
@@ -309,20 +389,45 @@ export function buildThreadRows(
       const glyph = threadGlyph(thread);
       const status = statuses.get(thread.id) ?? selectThreadStatus(thread, options.now);
       const open = thread.id === options.openThreadId;
-      const title = fit(thread.title, titleWidth);
-      const shown = thread.title.length > titleWidth ? titleWidth - 1 : thread.title.length;
+      const subagent = isSubagentThread(thread);
+      // Grouped: indented under the parent. Flat: a dim hint naming the parent.
+      const depth = block.depths?.get(thread.id) ?? 0;
+      const prefix = depth > 0 ? `${"  ".repeat(depth - 1)}${SUBAGENT_MARK} ` : "";
+      const parentTitle =
+        thread.parentThreadId === null ? undefined : titles.get(thread.parentThreadId);
+      const hintText =
+        subagent && depth === 0 ? ` ${SUBAGENT_MARK} ${parentTitle ?? "subagent"}` : "";
+      const room = Math.max(1, titleWidth - prefix.length);
+      // The hint takes what the title leaves, but never more than half.
+      const hintWidth = Math.min(
+        hintText.length,
+        Math.max(room - thread.title.length, Math.floor(room / 2)),
+      );
+      const hint = hintText === "" ? "" : fit(hintText, hintWidth);
+      const titleRoom = room - hint.length;
+      const title = fit(thread.title, titleRoom);
+      const shown = thread.title.length > titleRoom ? titleRoom - 1 : thread.title.length;
       const segments: Segment[] = [
         {
           text: `${(number === undefined ? "-" : String(number)).padStart(digits)} `,
           fg: colors.faint,
         },
         { text: `${glyph.text} `, fg: glyph.fg },
+        ...(prefix === "" ? [] : [{ text: prefix, fg: colors.faint }]),
         ...highlight(
-          title,
+          hint === "" ? title : title.trimEnd(),
           positions.filter((position) => position < shown),
           open ? colors.user : quiet ? colors.dim : colors.fg,
           colors.match,
         ),
+        ...(hint === ""
+          ? []
+          : [
+              {
+                text: `${hint}${" ".repeat(Math.max(0, titleRoom - title.trimEnd().length))}`,
+                fg: colors.faint,
+              },
+            ]),
         { text: ` ${fit(status.label, statusWidth)}`, fg: toneColor(status.tone) },
         { text: ` ${fit(projectTitle, PROJECT_WIDTH)}`, fg: colors.dim },
         {
@@ -345,7 +450,16 @@ export function buildThreadRows(
       }
     }
   }
-  return { rows, best, hiddenSettled };
+  let hiddenSubagents = 0;
+  if (options.showSubagents !== true) {
+    for (const group of groups) {
+      if (options.projectId !== null && group.projectId !== options.projectId) continue;
+      for (const thread of group.threads) {
+        if (!thread.archived && isSubagentThread(thread)) hiddenSubagents += 1;
+      }
+    }
+  }
+  return { rows, best, hiddenSettled, hiddenSubagents };
 }
 
 /** The dim line under the thread list: what is hidden or shown, and the keys for it. */
@@ -354,6 +468,8 @@ export function threadPickerFooter(state: {
   readonly showSettled: boolean;
   readonly showArchived: boolean;
   readonly hiddenSettled: number;
+  readonly showSubagents?: boolean;
+  readonly hiddenSubagents?: number;
 }): string {
   const parts = [state.layout === "flat" ? "recent first (C-g groups)" : "by project (C-g flat)"];
   if (!state.showSettled) {
@@ -362,6 +478,11 @@ export function threadPickerFooter(state: {
         ? `${state.hiddenSettled} settled/snoozed hidden (C-s shows)`
         : "settled hidden (C-s shows)",
     );
+  }
+  if (state.showSubagents === true) parts.push("subagents shown (C-x hides)");
+  else if ((state.hiddenSubagents ?? 0) > 0) {
+    const count = state.hiddenSubagents ?? 0;
+    parts.push(`${count} subagent${count === 1 ? "" : "s"} hidden (C-x shows)`);
   }
   if (state.showArchived) parts.push("archived shown (C-a hides)");
   return parts.join(" · ");

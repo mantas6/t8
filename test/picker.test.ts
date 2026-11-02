@@ -209,6 +209,9 @@ function summary(id: string, projectId: string, title: string, extra: Partial<Th
     latestMessage: null,
     parentThreadId: null,
     relationshipToParent: null,
+    providerNativeSubagent: false,
+    liveRun: false,
+    pendingSubagentRequest: null,
     createdAt: NOW - 60_000,
     updatedAt: NOW - 60_000,
     lastActivityAt: NOW - 60_000,
@@ -517,6 +520,219 @@ describe("thread picker sections and layouts", () => {
     const built = buildThreadRows(woken, { ...LIST, ...base });
     expect(rowsOf(built)).toEqual(["header:project:p1", "item:expired", "item:asked"]);
     expect(textOf(built.rows[2])).toContain("approval");
+  });
+});
+
+// Subagent threads: hidden by default, never numbered, nested when shown.
+const sub = (parent: string) =>
+  ({ parentThreadId: parent as ThreadId, relationshipToParent: "subagent" }) as const;
+const withSubagents: ReadonlyArray<ProjectGroup> = [
+  {
+    projectId: "p1" as ProjectId,
+    project: null,
+    title: "t8",
+    lastActivityAt: NOW,
+    threads: [
+      summary("kid", "p1", "Child task", { ...sub("par"), lastActivityAt: NOW - 500 }),
+      summary("par", "p1", "Parent work", {
+        lastActivityAt: NOW - 1000,
+        status: "running",
+        pendingSubagentRequest: "approval",
+      }),
+      summary("grandkid", "p1", "Grandchild", { ...sub("kid"), lastActivityAt: NOW - 600 }),
+      summary("fork", "p1", "Forked idea", {
+        parentThreadId: "par" as ThreadId,
+        relationshipToParent: "fork",
+        lastActivityAt: NOW - 2000,
+      }),
+      summary("orphan", "p1", "Lost child", { ...sub("gone"), lastActivityAt: NOW - 3000 }),
+      summary("other", "p1", "Other thread", { lastActivityAt: NOW - 4000 }),
+    ],
+  },
+  {
+    projectId: "p2" as ProjectId,
+    project: null,
+    title: "website",
+    lastActivityAt: NOW - 5000,
+    threads: [
+      summary("w1", "p2", "Landing page", { lastActivityAt: NOW - 5000 }),
+      summary("wkid", "p2", "Site helper", { ...sub("w1"), lastActivityAt: NOW - 100 }),
+    ],
+  },
+];
+
+describe("thread picker: subagent threads", () => {
+  test("hidden by default: no rows, no numbers, counted in the footer", () => {
+    const built = buildThreadRows(withSubagents, { ...LIST, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:project:p1",
+      "item:par",
+      "item:fork",
+      "item:other",
+      "header:project:p2",
+      "item:w1",
+    ]);
+    // The project header counts the listed threads only.
+    expect(textOf(built.rows[0])).toBe("t8  3");
+    expect(built.hiddenSubagents).toBe(4);
+    // The parent shows the request bubbled up from its subagent.
+    expect(textOf(built.rows[1])).toMatch(/^1 \? Parent work\s+↳ approval /);
+    expect(textOf(built.rows[2])).toMatch(/^2 · Forked idea /);
+    expect(threadIndex(withSubagents, LIST).map((thread) => String(thread.id))).toEqual([
+      "par",
+      "fork",
+      "other",
+      "w1",
+    ]);
+    expect(
+      threadPickerFooter({
+        layout: "grouped",
+        showSettled: true,
+        showArchived: false,
+        hiddenSettled: 0,
+        showSubagents: false,
+        hiddenSubagents: 4,
+      }),
+    ).toBe("by project (C-g flat) · 4 subagents hidden (C-x shows)");
+    expect(
+      threadPickerFooter({
+        layout: "grouped",
+        showSettled: true,
+        showArchived: false,
+        hiddenSettled: 0,
+        hiddenSubagents: 1,
+      }),
+    ).toBe("by project (C-g flat) · 1 subagent hidden (C-x shows)");
+    // Narrowed to a project: only its subagents are counted.
+    expect(
+      buildThreadRows(withSubagents, { ...LIST, ...base, projectId: "p2" }).hiddenSubagents,
+    ).toBe(1);
+  });
+
+  test("grouped and shown: indented under the parent, numbers unchanged", () => {
+    const options = { ...LIST, showSubagents: true };
+    const built = buildThreadRows(withSubagents, { ...options, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:project:p1",
+      "item:par",
+      "item:kid",
+      "item:grandkid",
+      "item:fork",
+      "item:orphan",
+      "item:other",
+      "header:project:p2",
+      "item:w1",
+      "item:wkid",
+    ]);
+    const text = (key: string) => textOf(built.rows.find((row) => row.key === key));
+    expect(text("par")).toMatch(/^1 \? Parent work/);
+    expect(text("kid")).toMatch(/^- · ↳ Child task\s+idle /);
+    expect(text("grandkid")).toMatch(/^- · {3}↳ Grandchild\s+idle /);
+    expect(text("fork")).toMatch(/^2 · Forked idea/);
+    // A subagent whose parent is not listed stands on its own, with a hint.
+    expect(text("orphan")).toMatch(/^- · Lost child ↳ subagent\s+idle /);
+    expect(text("other")).toMatch(/^3 · Other thread/);
+    expect(text("wkid")).toMatch(/^- · ↳ Site helper/);
+    expect(built.hiddenSubagents).toBe(0);
+    // Numbering does not move with the toggle.
+    expect(threadIndex(withSubagents, options).map((thread) => String(thread.id))).toEqual([
+      "par",
+      "fork",
+      "other",
+      "w1",
+    ]);
+    expect(
+      threadPickerFooter({
+        layout: "grouped",
+        showSettled: true,
+        showArchived: false,
+        hiddenSettled: 0,
+        showSubagents: true,
+        hiddenSubagents: 0,
+      }),
+    ).toBe("by project (C-g flat) · subagents shown (C-x hides)");
+  });
+
+  test("the parent's section decides: a settled parent takes its subagents along", () => {
+    const groups: ReadonlyArray<ProjectGroup> = [
+      {
+        projectId: "p1" as ProjectId,
+        project: null,
+        title: "t8",
+        lastActivityAt: NOW,
+        threads: [
+          summary("kid", "p1", "Child task", { ...sub("par"), lastActivityAt: NOW }),
+          summary("par", "p1", "Parent work", { settled: true, settledAt: NOW - 1000 }),
+          summary("a", "p1", "Active"),
+        ],
+      },
+    ];
+    const shown = buildThreadRows(groups, { ...LIST, ...base, showSubagents: true });
+    expect(rowsOf(shown)).toEqual([
+      "header:project:p1",
+      "item:a",
+      "header:settled:p1",
+      "item:par",
+      "item:kid",
+    ]);
+    const hidden = buildThreadRows(groups, {
+      ...LIST,
+      ...base,
+      showSubagents: true,
+      showSettled: false,
+    });
+    expect(rowsOf(hidden)).toEqual(["header:project:p1", "item:a"]);
+  });
+
+  test("flat and shown: in activity order with a dim ↳ parent hint", () => {
+    const options = { ...LIST, layout: "flat", showSubagents: true } as const;
+    const built = buildThreadRows(withSubagents, { ...options, ...base });
+    expect(rowsOf(built)).toEqual([
+      "header:recent",
+      "item:wkid",
+      "item:kid",
+      "item:grandkid",
+      "item:par",
+      "item:fork",
+      "item:orphan",
+      "item:other",
+      "item:w1",
+    ]);
+    const kid = built.rows.find((row) => row.key === "kid");
+    expect(textOf(kid)).toMatch(/^- · Child task ↳ Parent work\s+idle\s+t8 /);
+    expect(kid?.segments.find((segment) => segment.text.startsWith(" ↳"))?.fg).toBe(colors.faint);
+    expect(textOf(built.rows.find((row) => row.key === "grandkid"))).toContain(
+      "Grandchild ↳ Child task",
+    );
+    // Row widths stay the same as for other rows.
+    expect(textOf(kid).length).toBe(textOf(built.rows.find((row) => row.key === "par")).length);
+    expect(threadIndex(withSubagents, options).map((thread) => String(thread.id))).toEqual([
+      "par",
+      "fork",
+      "other",
+      "w1",
+    ]);
+    // Hidden in flat too.
+    const hidden = buildThreadRows(withSubagents, { ...options, ...base, showSubagents: false });
+    expect(rowsOf(hidden)).toEqual([
+      "header:recent",
+      "item:par",
+      "item:fork",
+      "item:other",
+      "item:w1",
+    ]);
+  });
+
+  test("a waiting subagent below gives the parent the ? glyph", () => {
+    expect(threadGlyph(summary("x", "p", "t", { pendingSubagentRequest: "user_input" })).text).toBe(
+      "?",
+    );
+  });
+
+  test("project picker counts leave subagents out", () => {
+    const text = buildProjectRows(withSubagents, { query: "", now: NOW, width: 80 }).map(textOf);
+    expect(text[0]).toMatch(/^t8\s+3 /);
+    expect(text[1]).toMatch(/^website\s+1 /);
   });
 });
 

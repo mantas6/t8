@@ -18,6 +18,7 @@ import type {
   AssistantMessageDisplayItem,
   DisplayItem,
   PendingRequest,
+  PendingSubagentRequest,
   ProjectGroup,
   QueuedRun,
   ShellState,
@@ -612,6 +613,11 @@ function compareThreads(a: ThreadSummary, b: ThreadSummary): number {
 export interface ThreadGroupOptions {
   /** Include archived threads. Default false. */
   readonly includeArchived?: boolean;
+  /**
+   * Include subagent threads. Default false: like the web app's navigation
+   * shells, the thread list, `:b <n>` and `gt` / `gT` leave them out.
+   */
+  readonly includeSubagents?: boolean;
   /** Include projects without (matching) threads. Default true. */
   readonly includeEmptyProjects?: boolean;
 }
@@ -624,6 +630,7 @@ export function selectProjectGroups(
   const byProject = new Map<string, ThreadSummary[]>();
   for (const thread of Object.values(state.threads)) {
     if (thread.archived && options.includeArchived !== true) continue;
+    if (isSubagentThread(thread) && options.includeSubagents !== true) continue;
     let list = byProject.get(thread.projectId);
     if (list === undefined) {
       list = [];
@@ -638,7 +645,11 @@ export function selectProjectGroups(
     const project = state.projects[projectId] ?? null;
     const threads = (byProject.get(projectId) ?? []).sort(compareThreads);
     if (threads.length === 0 && options.includeEmptyProjects === false) return;
-    const newest = threads.reduce((max, thread) => Math.max(max, thread.lastActivityAt), -Infinity);
+    // Subagents do not move their project, so showing them keeps the order.
+    const newest = threads.reduce(
+      (max, thread) => (isSubagentThread(thread) ? max : Math.max(max, thread.lastActivityAt)),
+      -Infinity,
+    );
     const projectUpdated = project === null ? Number.NaN : Date.parse(project.updatedAt);
     groups.push({
       projectId: (project?.id ?? threads[0]?.projectId) as ProjectGroup["projectId"],
@@ -660,6 +671,104 @@ export function selectProjectGroups(
 }
 
 // ---------------------------------------------------------------------------
+// Subagent threads
+
+/** A delegated child task. Forks are ordinary threads. */
+export function isSubagentThread(thread: Pick<ThreadSummary, "relationshipToParent">): boolean {
+  return thread.relationshipToParent === "subagent";
+}
+
+type LineageFields = Pick<ThreadSummary, "id" | "parentThreadId" | "relationshipToParent">;
+
+/**
+ * The thread whose row stands for `threadId` in a list without subagents: the
+ * thread itself, or a subagent's nearest non-subagent ancestor. A broken chain
+ * (missing parent, cycle) resolves to the thread itself. Upstream
+ * `resolveSidebarRowThreadId` (`apps/web/src/components/Sidebar.logic.ts`).
+ */
+export function resolveRowThreadId(
+  threadId: string,
+  threads: Readonly<Record<string, LineageFields>>,
+): string {
+  const visited = new Set<string>();
+  let thread = threads[threadId];
+  while (thread !== undefined && isSubagentThread(thread)) {
+    if (thread.parentThreadId === null || visited.has(thread.id)) return threadId;
+    visited.add(thread.id);
+    thread = threads[thread.parentThreadId];
+  }
+  return thread?.id ?? threadId;
+}
+
+/** How many subagent hops `thread` is below its nearest non-subagent ancestor (0 for none). */
+export function subagentDepth(
+  thread: LineageFields,
+  threads: Readonly<Record<string, LineageFields>>,
+): number {
+  const visited = new Set<string>();
+  let depth = 0;
+  let current: LineageFields | undefined = thread;
+  while (current !== undefined && isSubagentThread(current) && current.parentThreadId !== null) {
+    if (visited.has(current.id)) break;
+    visited.add(current.id);
+    depth += 1;
+    current = threads[current.parentThreadId];
+  }
+  return depth;
+}
+
+type SubagentRequestFields = LineageFields &
+  Pick<ThreadSummary, "archived" | "pendingRequest" | "providerNativeSubagent" | "liveRun">;
+
+/** What a subagent's own pending request asks of its ancestors, if anything. */
+function subagentRequest(thread: SubagentRequestFields): PendingSubagentRequest | null {
+  const kind = thread.pendingRequest?.kind;
+  if (
+    kind === undefined ||
+    kind === "auth_refresh" ||
+    !isSubagentThread(thread) ||
+    thread.archived ||
+    // Provider-native subagents ask on their parent already.
+    thread.providerNativeSubagent ||
+    // An async question outlives the run; once it ends, nobody waits on it.
+    !thread.liveRun
+  ) {
+    return null;
+  }
+  return kind === "user_input" ? "user_input" : "approval";
+}
+
+const NO_SUBAGENT_REQUESTS: ReadonlyMap<string, PendingSubagentRequest> = new Map();
+
+/**
+ * Threads with a subagent below them that waits for the user: each subagent
+ * with a live run and a pending request (not an auth refresh) marks every
+ * ancestor up its subagent chain; `approval` wins over `user_input`. Ported
+ * from upstream `pendingSubagentRequestsByThread`
+ * (`packages/client-runtime/src/state/threadShell.ts`).
+ */
+export function pendingSubagentRequestsByThread(
+  threads: Readonly<Record<string, SubagentRequestFields>>,
+): ReadonlyMap<string, PendingSubagentRequest> {
+  let requests: Map<string, PendingSubagentRequest> | null = null;
+  for (const child of Object.values(threads)) {
+    const request = subagentRequest(child);
+    if (request === null) continue;
+    requests ??= new Map();
+    const seen = new Set<string>([child.id]);
+    let current: SubagentRequestFields | undefined = child;
+    while (current !== undefined && isSubagentThread(current)) {
+      const parentId: string | null = current.parentThreadId;
+      if (parentId === null || seen.has(parentId)) break;
+      seen.add(parentId);
+      if (requests.get(parentId) !== "approval") requests.set(parentId, request);
+      current = threads[parentId];
+    }
+  }
+  return requests ?? NO_SUBAGENT_REQUESTS;
+}
+
+// ---------------------------------------------------------------------------
 // Thread status, settled and snoozed
 
 const ACTIVE_SHELL_STATUSES: ReadonlySet<ThreadSummary["status"]> = new Set([
@@ -675,7 +784,7 @@ const ACTIVE_SHELL_STATUSES: ReadonlySet<ThreadSummary["status"]> = new Set([
  * (`packages/client-runtime/src/state/threadSettled.ts`).
  */
 function raisedHandWhileSnoozed(thread: ThreadSummary): boolean {
-  if (thread.pendingRequest !== null) return true;
+  if (thread.pendingRequest !== null || thread.pendingSubagentRequest !== null) return true;
   if (thread.status !== "failed") return false;
   const failedAt = thread.latestRunCompletedAt;
   return thread.snoozedAt === null || (failedAt !== null && failedAt > thread.snoozedAt);
@@ -728,9 +837,12 @@ function pullRequestStatus(pr: NonNullable<ThreadSummary["pullRequest"]>): Threa
   }
 }
 
+/** Marks what comes from a subagent: a bubbled request, a subagent row's parent. */
+export const SUBAGENT_MARK = "↳";
+
 /**
  * The status label for a thread, most pressing first: archived, waiting for
- * the user (approval / question), working, queued, snoozed, failed, settled,
+ * the user (approval / question; `↳ approval` when a subagent below asks), working, queued, snoozed, failed, settled,
  * a linked pull request, idle. `now` (epoch ms) decides whether a snooze is
  * still on.
  */
@@ -745,6 +857,11 @@ export function selectThreadStatus(thread: ThreadSummary, now: number): ThreadSt
           ? "request"
           : "approval";
     return { kind: "approval", label, tone: "warn" };
+  }
+  // A subagent below waits for the user; open it (or its parent's transcript) to answer.
+  if (thread.pendingSubagentRequest !== null) {
+    const label = thread.pendingSubagentRequest === "user_input" ? "question" : "approval";
+    return { kind: "approval", label: `${SUBAGENT_MARK} ${label}`, tone: "warn" };
   }
   if (ACTIVE_SHELL_STATUSES.has(thread.status)) {
     return { kind: "working", label: "working", tone: "ok" };

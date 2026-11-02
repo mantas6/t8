@@ -41,7 +41,7 @@ import { createStore, reconcile, unwrap } from "solid-js/store";
 import { type DeliveryIntent, newCommandId, newMessageId } from "../commands.ts";
 import type { ProfileEntry } from "../connect.ts";
 import { canOperate } from "../pairing.ts";
-import { selectProjectGroups, selectThreadStatus } from "../state/selectors.ts";
+import { resolveRowThreadId, selectProjectGroups, selectThreadStatus } from "../state/selectors.ts";
 import type {
   DisplayItem,
   PendingApproval,
@@ -204,7 +204,7 @@ const FILTERED_PICKERS: ReadonlySet<View> = new Set<View>(["threads", "projects"
 
 const PICKER_HINTS: Readonly<Record<PickerView, string>> = {
   threads:
-    "type to filter · ↑↓ (j k) move · Enter open · dd archive · C-g flat/grouped · C-s settled · C-a archived · Esc clear/close",
+    "type to filter · ↑↓ (j k) move · Enter open · dd archive · C-g flat/grouped · C-s settled · C-x subagents · C-a archived · Esc clear/close",
   projects: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   models: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   modes: "j k move · Enter set the mode · Esc close",
@@ -411,9 +411,10 @@ export function App(props: AppProps) {
       if (thread.state.phase === "loading") runStatus = "loading";
       else if (thread.state.phase === "error") runStatus = "error";
       const shellStatus = current === undefined ? null : selectThreadStatus(current, clock());
-      // The open thread's own stream can be ahead of the shell's summary.
+      // The open thread's own stream can be ahead of the shell's summary, and
+      // its own request comes before one bubbled up from a subagent.
       const request = answerable();
-      if (request !== undefined && shellStatus?.kind !== "approval") {
+      if (request !== undefined && current?.pendingRequest == null) {
         status = {
           label: request.type === "approval" ? "approval" : "question",
           fg: colors.warn,
@@ -428,8 +429,14 @@ export function App(props: AppProps) {
         status = { label: shellStatus.label, fg: toneColor(shellStatus.tone) };
       }
     }
+    // A subagent thread names its parent: the picker hides subagents by default.
+    const lineage = view?.lineage ?? current;
+    const parentId = lineage === undefined ? null : lineage.parentThreadId;
+    const subagent =
+      lineage !== undefined && lineage.relationshipToParent === "subagent" && parentId !== null;
     return {
       project: projectId === undefined ? null : (shell.state.projects[projectId]?.title ?? null),
+      parent: subagent ? (shell.thread(parentId)?.title ?? "unknown thread") : null,
       branch:
         view?.branch ??
         current?.branch ??
@@ -592,7 +599,10 @@ export function App(props: AppProps) {
   };
 
   const cycleThread = (delta: number) => {
-    const next = stepThread(shell.groups(), threadId(), delta);
+    // A subagent steps from its parent's place in the list.
+    const id = threadId();
+    const from = id === null ? null : resolveRowThreadId(id, shell.state.threads);
+    const next = stepThread(shell.groups(), from, delta);
     if (next === null) {
       notice("no other thread in this project", "warn");
       return;
@@ -933,12 +943,20 @@ export function App(props: AppProps) {
   const [showArchived, setShowArchived] = createSignal(false);
   /** Thread picker choices, kept for the session: settled / snoozed shown, and the layout. */
   const [showSettled, setShowSettled] = createSignal(true);
+  const [showSubagents, setShowSubagents] = createSignal(false);
   const [threadLayout, setThreadLayout] = createSignal<ThreadLayout>("grouped");
   const listOptions = (): ThreadListOptions => ({
     layout: threadLayout(),
     showSettled: showSettled(),
+    showSubagents: showSubagents(),
     now: clock(),
   });
+  /** The picker row that stands for the open thread: its parent's, for a hidden subagent. */
+  const openRowId = (): string | null => {
+    const id = threadId();
+    if (id === null || showSubagents()) return id;
+    return resolveRowThreadId(id, shell.state.threads);
+  };
   const [projectPurpose, setProjectPurpose] = createSignal<"narrow" | "new">("narrow");
   const [modelPurpose, setModelPurpose] = createSignal<"set" | "new">("set");
   const [draft, setDraft] = createSignal<NewThreadDraft | null>(null);
@@ -951,15 +969,19 @@ export function App(props: AppProps) {
   const [archived, setArchived] = createSignal<ReadonlyArray<ThreadSummary>>([]);
   /** Saved profiles for `:servers`; null while loading. */
   const [serverEntries, setServerEntries] = createSignal<ReadonlyArray<ProfileEntry> | null>(null);
+  // With subagents: the rows leave them out (and count them) unless shown.
   const pickerGroups = createMemo((): ReadonlyArray<ProjectGroup> => {
-    const groups = shell.groups();
+    const groups = shell.groupsWithSubagents();
     if (!showArchived()) return groups;
     const extra = archived();
     return untrack(() => {
       const state = unwrap(shell.state);
       const threads: Record<string, ThreadSummary> = { ...state.threads };
       for (const entry of extra) threads[entry.id] ??= entry;
-      const all = selectProjectGroups({ ...state, threads }, { includeArchived: true });
+      const all = selectProjectGroups(
+        { ...state, threads },
+        { includeArchived: true, includeSubagents: true },
+      );
       // Keep the projects where they are without archived threads, so the
       // rows stay in `:b <n>` order; projects with only archived threads go last.
       const order = new Map(groups.map((group, index) => [group.projectId as string, index]));
@@ -995,7 +1017,7 @@ export function App(props: AppProps) {
           query: pickerFilter(),
           projectId: threadProject(),
           width: pickerWidth(),
-          openThreadId: threadId(),
+          openThreadId: openRowId(),
         })
       : null,
   );
@@ -1140,7 +1162,7 @@ export function App(props: AppProps) {
   ) => {
     if (layout !== null) setThreadLayout(layout);
     setThreadProject(projectId);
-    openPicker("threads", filter, threadId());
+    openPicker("threads", filter, openRowId());
   };
 
   const openProjectPicker = (purpose: "narrow" | "new") => {
@@ -1787,6 +1809,11 @@ export function App(props: AppProps) {
             : "settled and snoozed threads hidden",
         );
         return;
+      case "picker.toggleSubagents":
+        if (ui.view() !== "threads") return;
+        setShowSubagents((shown) => !shown);
+        notice(showSubagents() ? "subagent threads shown" : "subagent threads hidden");
+        return;
       case "picker.toggleLayout":
         if (ui.view() !== "threads") return;
         setThreadLayout((layout) => (layout === "flat" ? "grouped" : "flat"));
@@ -2030,6 +2057,8 @@ export function App(props: AppProps) {
                 showSettled: showSettled(),
                 showArchived: showArchived(),
                 hiddenSettled: threadRows()?.hiddenSettled ?? 0,
+                showSubagents: showSubagents(),
+                hiddenSubagents: threadRows()?.hiddenSubagents ?? 0,
               })
             }
             initialFilter={untrack(pickerFilter)}

@@ -36,32 +36,31 @@ const THREAD_ID = first.projection.thread.id;
 
 const PROJECT_ID = first.projection.thread.projectId;
 
-const SHELL = shellSnapshot(
-  [projectShell(PROJECT_ID, "t8"), projectShell("project-web", "website")],
-  [
-    threadShell(THREAD_ID, PROJECT_ID, {
-      title: "t8 smoke test",
-      latestUserMessageAt: "2026-11-02T07:00:00.000Z",
-    }),
-    threadShell("thread-build", PROJECT_ID, {
-      title: "Fix the build",
-      status: "running",
-      latestUserMessageAt: "2026-11-02T06:00:00.000Z",
-    }),
-    threadShell("thread-landing", "project-web", { title: "Landing page copy" }),
-    // The settled / snoozed section of "website"; relative to the real clock.
-    threadShell("thread-later", "project-web", {
-      title: "Revisit pricing",
-      snoozedUntil: new Date(Date.now() + 3 * 3_600_000 - 60_000).toISOString(),
-      snoozedAt: new Date(Date.now() - 3_600_000).toISOString(),
-    }),
-    threadShell("thread-old-copy", "project-web", {
-      title: "Old copy",
-      settledOverride: "settled",
-      settledAt: "2026-11-02T06:50:00.000Z",
-    }),
-  ],
-);
+const SHELL_PROJECTS = [projectShell(PROJECT_ID, "t8"), projectShell("project-web", "website")];
+const SHELL_THREADS = [
+  threadShell(THREAD_ID, PROJECT_ID, {
+    title: "t8 smoke test",
+    latestUserMessageAt: "2026-11-02T07:00:00.000Z",
+  }),
+  threadShell("thread-build", PROJECT_ID, {
+    title: "Fix the build",
+    status: "running",
+    latestUserMessageAt: "2026-11-02T06:00:00.000Z",
+  }),
+  threadShell("thread-landing", "project-web", { title: "Landing page copy" }),
+  // The settled / snoozed section of "website"; relative to the real clock.
+  threadShell("thread-later", "project-web", {
+    title: "Revisit pricing",
+    snoozedUntil: new Date(Date.now() + 3 * 3_600_000 - 60_000).toISOString(),
+    snoozedAt: new Date(Date.now() - 3_600_000).toISOString(),
+  }),
+  threadShell("thread-old-copy", "project-web", {
+    title: "Old copy",
+    settledOverride: "settled",
+    settledAt: "2026-11-02T06:50:00.000Z",
+  }),
+];
+const SHELL = shellSnapshot(SHELL_PROJECTS, SHELL_THREADS);
 
 const CATALOG: ModelCatalog = {
   providers: [
@@ -79,10 +78,14 @@ const CATALOG: ModelCatalog = {
   defaultRuntimeMode: "full-access",
 };
 
-function fakeBackend() {
+function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) {
   const shell = createShellStore();
   const thread = createThreadStore();
-  shell.apply(SHELL);
+  shell.apply(
+    extraThreads.length === 0
+      ? SHELL
+      : shellSnapshot(SHELL_PROJECTS, [...SHELL_THREADS, ...extraThreads]),
+  );
   const calls = {
     opened: [] as string[],
     sent: [] as Array<{ text: string; intent: string }>,
@@ -201,8 +204,11 @@ afterEach(async () => {
 
 const ARM_MS = 40;
 
-async function mount(threadId: ThreadId | null) {
-  const fake = fakeBackend();
+async function mount(
+  threadId: ThreadId | null,
+  extraThreads: ReadonlyArray<Record<string, unknown>> = [],
+) {
+  const fake = fakeBackend(extraThreads);
   let quits = 0;
   const setup = await testRender(
     () => (
@@ -439,6 +445,98 @@ describe("App", () => {
     app.mockInput.pressKey("y");
     await app.frame();
     expect(app.calls.archived).toEqual(["thread-build"]);
+  });
+
+  test("subagent threads: hidden in :t, C-x shows them indented, requests bubble up", async () => {
+    const subagent = (id: string, parent: string, title: string, extra = {}) =>
+      threadShell(id, PROJECT_ID, {
+        title,
+        creationSource: "mcp",
+        lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+        latestUserMessageAt: "2026-11-02T07:30:00.000Z",
+        ...extra,
+      });
+    const app = await mount(null, [
+      subagent("thread-helper", "thread-build", "Delegated helper", {
+        status: "waiting",
+        activeRunId: "run-helper",
+        pendingRuntimeRequest: {
+          id: "request-helper",
+          kind: "command",
+          createdAt: "2026-11-02T07:30:00.000Z",
+        },
+      }),
+      subagent("thread-reviewer", THREAD_ID, "Delegated reviewer"),
+    ]);
+    await app.frame();
+    const picker = await command(app, "t");
+    expect(picker).not.toContain("Delegated");
+    // Numbers are unchanged; the parent shows its subagent's request.
+    expect(picker).toMatch(/1 · t8 smoke test\s+idle/);
+    expect(picker).toMatch(/2 \? Fix the build\s+↳ approval/);
+    expect(picker).toMatch(/t8 +2/);
+    expect(picker).toContain("2 subagents hidden (C-x shows)");
+
+    app.mockInput.pressKey("x", { ctrl: true });
+    const shown = await app.frame();
+    expect(shown).toMatch(/1 · t8 smoke test[^\n]*\n[^\n]*- · ↳ Delegated reviewer\s+idle/);
+    expect(shown).toMatch(/2 \? Fix the build[^\n]*\n[^\n]*- \? ↳ Delegated helper\s+approval/);
+    expect(shown).toContain("subagents shown (C-x hides)");
+    // Kept for the session.
+    app.mockInput.pressEscape();
+    await app.frame();
+    expect(await command(app, "t")).toContain("↳ Delegated helper");
+
+    // Opening a subagent from the picker works; the header names its parent.
+    await app.mockInput.typeText("helper");
+    await app.frame();
+    app.mockInput.pressEnter();
+    const opened = await app.frame();
+    expect(app.calls.opened).toEqual(["thread-helper"]);
+    // (Cut short here by the toggle's notice; the --thread test checks it whole.)
+    expect(opened.split("\n")[0]).toContain("Delegated helper · ↳ parent");
+
+    // gt from a subagent steps from its parent's place, skipping subagents.
+    app.mockInput.pressKey("g");
+    app.mockInput.pressKey("t");
+    await app.frame();
+    expect(app.calls.opened.at(-1)).toBe(THREAD_ID);
+    await command(app, "bn");
+    expect(app.calls.opened.at(-1)).toBe("thread-build");
+    await command(app, "bp");
+    expect(app.calls.opened.at(-1)).toBe(THREAD_ID);
+    // :b counts without subagents.
+    await command(app, "b 2");
+    expect(app.calls.opened.at(-1)).toBe("thread-build");
+    // The open thread's status line shows the bubbled request.
+    expect((await app.frame()).split("\n")[0]).toContain("↳ approval");
+
+    // C-x again hides them.
+    await command(app, "t");
+    app.mockInput.pressKey("x", { ctrl: true });
+    expect(await app.frame()).not.toContain("Delegated");
+  });
+
+  test("--thread opens a subagent directly", async () => {
+    const app = await mount("thread-helper" as ThreadId, [
+      threadShell("thread-helper", PROJECT_ID, {
+        title: "Delegated helper",
+        creationSource: "mcp",
+        lineage: {
+          parentThreadId: "thread-build",
+          relationshipToParent: "subagent",
+          rootThreadId: "thread-build",
+        },
+      }),
+    ]);
+    const frame = await app.frame();
+    expect(app.calls.opened).toEqual(["thread-helper"]);
+    expect(frame.split("\n")[0]).toContain("Delegated helper · ↳ parent: Fix the build");
+    // The picker puts the cursor on the parent's row while subagents are hidden.
+    await command(app, "t");
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.opened.at(-1)).toBe("thread-build");
   });
 
   test(":b <n>, :bn, Tab completion and history", async () => {

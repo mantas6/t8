@@ -1,5 +1,6 @@
 /**
- * Top status line: mode block, then project · branch · thread · model (dim)
+ * Top status line: mode block, then project · branch · thread (`↳ parent:
+ * <title>` for a subagent) · model (dim)
  * and the thread's status label (coloured, the same label as the thread
  * picker), and on the right the notice / pending keys, the
  * connection state and the server (profile name). When not connected a banner row is added below it.
@@ -14,6 +15,8 @@ export interface StatusInfo {
   readonly project: string | null;
   readonly branch: string | null;
   readonly title: string | null;
+  /** The parent thread's title, when the open thread is a subagent. */
+  readonly parent?: string | null;
   readonly model: string | null;
   /** Loading / error state of the thread view, when not ready. */
   readonly runStatus: string | null;
@@ -95,9 +98,15 @@ export function StatusLine(props: {
   };
   const center = () => {
     const info = props.info();
-    const parts = [info.project, info.branch, info.title, info.model, info.runStatus].filter(
-      (part): part is string => part !== null && part !== "",
-    );
+    const parent = info.parent == null ? null : `↳ parent: ${info.parent}`;
+    const parts = [
+      info.project,
+      info.branch,
+      info.title,
+      parent,
+      info.model,
+      info.runStatus,
+    ].filter((part): part is string => part !== null && part !== "");
     const used = MODE_LABEL[props.mode()].length + right().length + 4;
     const notice = message();
     const status = info.status === null ? "" : ` · ${info.status.label}`;

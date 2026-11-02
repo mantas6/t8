@@ -194,6 +194,7 @@ Typing filters (fuzzy: `t3t` finds "t8"); the best match gets the cursor.
 | `J` `K`                         | queue: move the message down / up                           |
 | `Ctrl-a`                        | thread picker: show / hide archived threads                 |
 | `Ctrl-s`                        | thread picker: show / hide settled and snoozed threads      |
+| `Ctrl-x`                        | thread picker: show / hide subagent threads                 |
 | `Ctrl-g`                        | thread picker: grouped by project / flat, most recent first |
 
 `:connect` without a link asks for it (paste it there; a link typed after
@@ -205,16 +206,28 @@ The thread picker groups threads by project, newest activity first; `Ctrl-g`
 first, and back. Within a project (or the flat list) the active threads come
 first, then a dim **settled / snoozed** section, then archived threads when
 `Ctrl-a` shows them; `Ctrl-s` hides the settled / snoozed section. The layout
-and both toggles are kept for the session. Each row has its number (what
+and the toggles are kept for the session. Each row has its number (what
 `:b <n>` takes: it counts the rows in the order shown, so it follows the
 layout and the `Ctrl-s` toggle, but not the filter), a status glyph (`●`
 running, `◌` queued, `?` waiting for an approval or answer, `·` idle, `✕`
 failed, `×` archived), the title, a status label, the project and how long ago
-it was active. The status labels, most pressing first:
+it was active.
+
+Subagent threads (child tasks a thread delegated) are hidden, as in the web
+app: they get no row, no `:b` number, no place in `gt` / `gT` / `:bn` / `:bp`
+and no count; the footer says how many are hidden. A subagent waiting for an
+approval or an answer marks its parent (and every ancestor) with `↳ approval`
+/ `↳ question`. `Ctrl-x` shows them, still without numbers: indented under
+their parent when grouped, with a dim `↳ <parent>` hint when flat. Forks are
+ordinary threads. A subagent opened directly (from the picker or with
+`--thread`) names its parent in the status line (`↳ parent: <title>`).
+
+The status labels, most pressing first:
 
 | Label                              | Meaning                                                           |
 | ---------------------------------- | ----------------------------------------------------------------- |
 | `approval` / `question` (yellow)   | waiting for an approval or an answer                              |
+| `↳ approval` / `↳ question`        | a subagent below the thread is waiting for one                    |
 | `working` (green)                  | a run is preparing, starting, running or waiting                  |
 | `queued` (green)                   | a run is queued                                                   |
 | `snoozed until 3h` (dim)           | snoozed; a request or a new failure wakes it early                |

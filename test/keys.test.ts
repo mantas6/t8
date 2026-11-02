@@ -286,6 +286,8 @@ describe("default keymaps", () => {
     expect(resolve("pickerList", ["<C-s>"])).toBe("picker.toggleSettled");
     expect(resolve("pickerList", ["<C-g>"])).toBe("picker.toggleLayout");
     expect(resolve("pickerList", ["<C-a>"])).toBe("picker.toggleArchived");
+    expect(resolve("picker", ["<C-x>"])).toBe("picker.toggleSubagents");
+    expect(resolve("pickerList", ["<C-x>"])).toBe("picker.toggleSubagents");
   });
 
   test("help layers", () => {

@@ -102,8 +102,10 @@ function ownMaps<T extends object>(state: T, maps: ReadonlyArray<keyof T>): T {
 
 export interface ShellStore {
   readonly state: ShellState;
-  /** Non-archived threads grouped by project, newest activity first. */
+  /** Non-archived, non-subagent threads grouped by project, newest activity first. */
   readonly groups: Accessor<ReadonlyArray<ProjectGroup>>;
+  /** The same groups with subagent threads included (the thread picker shows them on request). */
+  readonly groupsWithSubagents: Accessor<ReadonlyArray<ProjectGroup>>;
   readonly thread: (id: string) => ThreadSummary | undefined;
   /** Applies a shell stream item; returns whether anything changed. */
   readonly apply: (item: OrchestrationV2ShellStreamItem) => boolean;
@@ -130,9 +132,14 @@ export function createShellStore(initial: ShellState = initialShellState): Shell
       revision();
       return untrack(() => selectProjectGroups(unwrap(state)));
     });
+    const groupsWithSubagents = createMemo(() => {
+      revision();
+      return untrack(() => selectProjectGroups(unwrap(state), { includeSubagents: true }));
+    });
     return {
       state,
       groups,
+      groupsWithSubagents,
       thread: (id) => state.threads[id],
       apply: (item) => update((current) => applyShellStreamItem(current, item)),
       setConnection: (status) => update((current) => applyConnectionStatus(current, status)),

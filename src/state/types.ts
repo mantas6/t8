@@ -75,6 +75,24 @@ export interface ThreadSummary {
   readonly latestMessage: { readonly role: string; readonly preview: string } | null;
   readonly parentThreadId: ThreadId | null;
   readonly relationshipToParent: "fork" | "subagent" | null;
+  /**
+   * A subagent the provider runs inside its parent's conversation (Claude's
+   * own Task tool, say). It asks its questions on the parent, so its requests
+   * are not bubbled up. Upstream `isProviderNativeSubagentThread`.
+   */
+  readonly providerNativeSubagent: boolean;
+  /**
+   * The thread has a live run (preparing, starting, running or waiting).
+   * Upstream `isChildRunLive`: the server's `activityRunStatus`, else the
+   * shell status for servers that do not send it.
+   */
+  readonly liveRun: boolean;
+  /**
+   * A request waiting in a subagent below this thread (its child, grandchild,
+   * ...): `approval` wins over `user_input`. Derived across threads by the
+   * shell reducer (`pendingSubagentRequestsByThread`).
+   */
+  readonly pendingSubagentRequest: PendingSubagentRequest | null;
   /** Epoch ms. */
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -100,6 +118,9 @@ export interface ThreadSummary {
   /** The thread's current pull request, when one is linked. */
   readonly pullRequest: ThreadPullRequestSummary | null;
 }
+
+/** What a subagent below a thread is waiting for (upstream `PendingSubagentRequest`). */
+export type PendingSubagentRequest = "approval" | "user_input";
 
 export interface ThreadPullRequestSummary {
   readonly number: number;

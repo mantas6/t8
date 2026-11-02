@@ -87,6 +87,7 @@ export type ActionId =
   | "picker.toggleArchived"
   | "picker.toggleSettled"
   | "picker.toggleLayout"
+  | "picker.toggleSubagents"
   | "confirm.yes"
   | "confirm.no"
   | "help.down"
@@ -157,6 +158,7 @@ export const ACTION_DESCRIPTIONS: Readonly<Record<ActionId, string>> = {
   "picker.toggleArchived": "thread picker: show / hide archived threads",
   "picker.toggleSettled": "thread picker: show / hide settled and snoozed threads",
   "picker.toggleLayout": "thread picker: group by project / flat, most recent first",
+  "picker.toggleSubagents": "thread picker: show / hide subagent threads",
   "confirm.yes": "yes",
   "confirm.no": "no",
   "help.down": "scroll down",
@@ -255,6 +257,7 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<C-a>", action: "picker.toggleArchived" },
     { keys: "<C-s>", action: "picker.toggleSettled" },
     { keys: "<C-g>", action: "picker.toggleLayout" },
+    { keys: "<C-x>", action: "picker.toggleSubagents" },
   ],
   pickerList: [
     { keys: "j", action: "picker.down" },

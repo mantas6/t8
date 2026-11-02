@@ -6,6 +6,7 @@
 import type { InputRenderable } from "@opentui/core";
 import type { Accessor } from "solid-js";
 
+import { isSubagentThread } from "../../state/selectors.ts";
 import type { ProjectGroup } from "../../state/types.ts";
 import { fuzzyFilter } from "../fuzzy.ts";
 import { fit, highlight, type PickerRow, relativeTime } from "../picker.ts";
@@ -35,7 +36,9 @@ export function buildProjectRows(
     return `${group.title} ${show(root)}`;
   }).map(({ item: group, match }) => {
     const shown = group.title.length > titleWidth ? titleWidth - 1 : group.title.length;
-    const count = group.threads.filter((thread) => !thread.archived).length;
+    const count = group.threads.filter(
+      (thread) => !thread.archived && !isSubagentThread(thread),
+    ).length;
     return {
       key: group.projectId,
       kind: "item" as const,

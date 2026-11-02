@@ -5,8 +5,12 @@ import * as Schema from "effect/Schema";
 import { applyShellStreamItem, initialShellState } from "../src/state/reducers/shell.ts";
 import {
   isEffectivelySnoozed,
+  pendingSubagentRequestsByThread,
+  resolveRowThreadId,
+  selectProjectGroups,
   selectThreadSection,
   selectThreadStatus,
+  subagentDepth,
   timeUntil,
 } from "../src/state/selectors.ts";
 import type { ShellState, ThreadSummary } from "../src/state/types.ts";
@@ -263,5 +267,227 @@ describe("shell reducer keeps settled, snoozed and pull request fields current",
       checks: "passing",
       others: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Subagent threads
+
+const subagentOf = (parent: string, overrides: Json = {}): Json => ({
+  creationSource: "mcp",
+  lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+  ...overrides,
+});
+
+/** A subagent waiting for the user: live run, pending request of `kind`. */
+const asking = (parent: string, kind: string, overrides: Json = {}): Json =>
+  subagentOf(parent, {
+    status: "waiting",
+    activeRunId: "run-1",
+    pendingRuntimeRequest: pendingRequest(kind),
+    ...overrides,
+  });
+
+function shellOf(threads: ReadonlyArray<Json>, archived: ReadonlyArray<Json> = []): ShellState {
+  return applyShellStreamItem(
+    initialShellState,
+    shellSnapshot([projectShell("p1", "t8")], threads, archived),
+  );
+}
+
+const requestsOf = (state: ShellState) =>
+  Object.fromEntries(
+    Object.values(state.threads)
+      .filter((thread) => thread.pendingSubagentRequest !== null)
+      .map((thread) => [thread.id, thread.pendingSubagentRequest]),
+  );
+
+describe("subagent requests bubble up to the parent", () => {
+  test("single level: the parent shows ↳ approval / ↳ question", () => {
+    const approval = shellOf([
+      threadShell("parent", "p1", { status: "running" }),
+      threadShell("child", "p1", asking("parent", "command")),
+    ]);
+    expect(requestsOf(approval)).toEqual({ parent: "approval" });
+    const parent = approval.threads.parent as ThreadSummary;
+    expect(selectThreadStatus(parent, NOW)).toEqual({
+      kind: "approval",
+      label: "↳ approval",
+      tone: "warn",
+    });
+    // The child itself shows its own request.
+    expect(selectThreadStatus(approval.threads.child as ThreadSummary, NOW).label).toBe("approval");
+
+    const question = shellOf([
+      threadShell("parent", "p1"),
+      threadShell("child", "p1", asking("parent", "user_input")),
+    ]);
+    expect(selectThreadStatus(question.threads.parent as ThreadSummary, NOW).label).toBe(
+      "↳ question",
+    );
+  });
+
+  test("the parent's own request comes first", () => {
+    const state = shellOf([
+      threadShell("parent", "p1", {
+        status: "waiting",
+        pendingRuntimeRequest: pendingRequest("user_input"),
+      }),
+      threadShell("child", "p1", asking("parent", "command")),
+    ]);
+    expect(selectThreadStatus(state.threads.parent as ThreadSummary, NOW).label).toBe("question");
+  });
+
+  test("a chain marks every ancestor; a fork is not a link", () => {
+    const state = shellOf([
+      threadShell("root", "p1"),
+      threadShell("middle", "p1", subagentOf("root", { status: "running" })),
+      threadShell("leaf", "p1", asking("middle", "file-change")),
+      threadShell("fork", "p1", {
+        lineage: { parentThreadId: "root", relationshipToParent: "fork", rootThreadId: "root" },
+      }),
+      threadShell("forked-child", "p1", asking("fork", "command")),
+    ]);
+    expect(requestsOf(state)).toEqual({ root: "approval", middle: "approval", fork: "approval" });
+    // A fork's subagent bubbles to the fork, not past it.
+    const fork = state.threads.fork as ThreadSummary;
+    expect(fork.relationshipToParent).toBe("fork");
+  });
+
+  test("a cycle stops the walk", () => {
+    const state = shellOf([
+      threadShell("a", "p1", asking("b", "command")),
+      threadShell("b", "p1", subagentOf("a")),
+    ]);
+    expect(requestsOf(state)).toEqual({ b: "approval" });
+    expect(resolveRowThreadId("a", state.threads)).toBe("a");
+    expect(subagentDepth(state.threads.a as ThreadSummary, state.threads)).toBe(2);
+  });
+
+  test("ignored: archived child, auth refresh, provider-native, no live run", () => {
+    const ignored = shellOf(
+      [
+        threadShell("parent", "p1"),
+        threadShell("auth", "p1", asking("parent", "auth_refresh")),
+        threadShell("native", "p1", asking("parent", "command", { creationSource: "provider" })),
+        threadShell("ended", "p1", asking("parent", "user_input", { status: "completed" })),
+        threadShell(
+          "blocked",
+          "p1",
+          // The server says no activity run, whatever the status.
+          asking("parent", "command", { status: "running", activityRunStatus: null }),
+        ),
+      ],
+      [threadShell("archived", "p1", asking("parent", "command"))],
+    );
+    expect(requestsOf(ignored)).toEqual({});
+    expect(ignored.threads.native?.providerNativeSubagent).toBe(true);
+    expect(ignored.threads.ended?.liveRun).toBe(false);
+    expect(ignored.threads.blocked?.liveRun).toBe(false);
+    // The activity run counts even when the shell status says otherwise.
+    const queuedBehind = shellOf([
+      threadShell("parent", "p1"),
+      threadShell(
+        "child",
+        "p1",
+        asking("parent", "command", { status: "queued", activityRunStatus: "waiting" }),
+      ),
+    ]);
+    expect(requestsOf(queuedBehind)).toEqual({ parent: "approval" });
+  });
+
+  test("approval beats user_input, whatever the order", () => {
+    for (const order of [
+      ["user_input", "command"],
+      ["command", "user_input"],
+    ] as const) {
+      const state = shellOf([
+        threadShell("parent", "p1"),
+        threadShell("c1", "p1", asking("parent", order[0])),
+        threadShell("c2", "p1", asking("parent", order[1])),
+      ]);
+      expect(requestsOf(state)).toEqual({ parent: "approval" });
+    }
+    // Over a chain too: the leaf's question does not replace the middle's approval.
+    const chain = shellOf([
+      threadShell("root", "p1"),
+      threadShell("middle", "p1", asking("root", "command")),
+      threadShell("leaf", "p1", asking("middle", "user_input")),
+    ]);
+    expect(requestsOf(chain)).toEqual({ root: "approval", middle: "user_input" });
+  });
+
+  test("events keep it current; unchanged threads keep their identity", () => {
+    let state = shellOf([
+      threadShell("parent", "p1"),
+      threadShell("child", "p1", asking("parent", "command")),
+      threadShell("other", "p1"),
+    ]);
+    const other = state.threads.other;
+    const event = (item: Json) => {
+      state = applyShellStreamItem(state, decode(item));
+    };
+    event({
+      kind: "thread.updated",
+      sequence: 101,
+      location: "active",
+      thread: threadShell("child", "p1", subagentOf("parent", { status: "running" })),
+    });
+    expect(requestsOf(state)).toEqual({});
+    expect(state.threads.other).toBe(other);
+    event({
+      kind: "thread.updated",
+      sequence: 102,
+      location: "active",
+      thread: threadShell("child", "p1", asking("parent", "user_input")),
+    });
+    expect(requestsOf(state)).toEqual({ parent: "user_input" });
+    event({ kind: "thread.removed", sequence: 103, location: "active", threadId: "child" });
+    expect(requestsOf(state)).toEqual({});
+    expect(state.threads.other).toBe(other);
+  });
+
+  test("a request below wakes a snoozed parent", () => {
+    const state = shellOf([
+      threadShell("parent", "p1", {
+        snoozedUntil: iso(NOW + HOUR),
+        snoozedAt: iso(NOW - HOUR),
+      }),
+      threadShell("child", "p1", asking("parent", "command")),
+    ]);
+    const parent = state.threads.parent as ThreadSummary;
+    expect(isEffectivelySnoozed(parent, NOW)).toBe(false);
+    expect(selectThreadSection(parent, NOW)).toBe("active");
+  });
+
+  test("pendingSubagentRequestsByThread works on plain summaries", () => {
+    const state = shellOf([
+      threadShell("parent", "p1"),
+      threadShell("child", "p1", asking("parent", "command")),
+    ]);
+    expect([...pendingSubagentRequestsByThread(state.threads)]).toEqual([["parent", "approval"]]);
+    expect(pendingSubagentRequestsByThread({}).size).toBe(0);
+  });
+});
+
+describe("subagent threads in the thread groups", () => {
+  test("hidden by default, forks listed; the project's activity ignores subagents", () => {
+    const state = shellOf([
+      threadShell("parent", "p1", { latestUserMessageAt: iso(NOW - HOUR) }),
+      threadShell("child", "p1", subagentOf("parent", { latestUserMessageAt: iso(NOW) })),
+      threadShell("fork", "p1", {
+        lineage: { parentThreadId: "parent", relationshipToParent: "fork", rootThreadId: "parent" },
+      }),
+    ]);
+    const ids = (groups: ReturnType<typeof selectProjectGroups>) =>
+      groups.flatMap((group) => group.threads.map((thread) => String(thread.id))).sort();
+    const groups = selectProjectGroups(state);
+    expect(ids(groups)).toEqual(["fork", "parent"]);
+    const withSubagents = selectProjectGroups(state, { includeSubagents: true });
+    expect(ids(withSubagents)).toEqual(["child", "fork", "parent"]);
+    expect(withSubagents[0]?.lastActivityAt).toBe(groups[0]?.lastActivityAt);
+    expect(resolveRowThreadId("child", state.threads)).toBe("parent");
+    expect(resolveRowThreadId("fork", state.threads)).toBe("fork");
+    expect(resolveRowThreadId("unknown", state.threads)).toBe("unknown");
   });
 });

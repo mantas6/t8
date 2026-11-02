@@ -8,16 +8,18 @@
  *   lists are empty and its sequence must not move the cursor.
  * - Events at or below the current sequence are replays and are dropped.
  */
-import type {
-  OrchestrationProjectShell,
-  OrchestrationV2ShellSnapshot,
-  OrchestrationV2ShellStreamItem,
-  OrchestrationV2ThreadShell,
-  ThreadPullRequestLink,
+import {
+  isProviderNativeSubagentThread,
+  type OrchestrationProjectShell,
+  type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ShellStreamItem,
+  type OrchestrationV2ThreadShell,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import type { ConnectionStatus } from "../../connection/connection.ts";
+import { pendingSubagentRequestsByThread } from "../selectors.ts";
 import type {
   ConnectionView,
   ShellState,
@@ -98,6 +100,24 @@ export function currentPullRequest(
   };
 }
 
+const LIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/**
+ * Upstream `isChildRunLive`: the activity run stays set while a follow-up is
+ * queued behind a blocked run; older servers omit it, so fall back to the
+ * shell status.
+ */
+function hasLiveRun(thread: Pick<OrchestrationV2ThreadShell, "activityRunStatus" | "status">) {
+  return thread.activityRunStatus !== undefined
+    ? thread.activityRunStatus !== null
+    : LIVE_RUN_STATUSES.has(thread.status);
+}
+
 export function toThreadSummary(
   thread: OrchestrationV2ThreadShell,
   location: "active" | "archive",
@@ -123,6 +143,10 @@ export function toThreadSummary(
           },
     parentThreadId: thread.lineage.parentThreadId,
     relationshipToParent: thread.lineage.relationshipToParent,
+    providerNativeSubagent: isProviderNativeSubagentThread(thread),
+    liveRun: hasLiveRun(thread),
+    // Filled in across threads by `withSubagentRequests`.
+    pendingSubagentRequest: null,
     createdAt: DateTime.toEpochMillis(thread.createdAt),
     updatedAt,
     // Upstream sorts by the latest user message, falling back to the last update.
@@ -137,6 +161,25 @@ export function toThreadSummary(
     latestRunCompletedAt: epochMs(thread.latestRunCompletedAt),
     pullRequest: currentPullRequest(thread),
   };
+}
+
+/**
+ * Stamps each thread's `pendingSubagentRequest` from the requests waiting in
+ * the subagents below it. Only threads whose value changes get a new object,
+ * so unchanged summaries keep their identity.
+ */
+export function withSubagentRequests(
+  threads: Readonly<Record<string, ThreadSummary>>,
+): Readonly<Record<string, ThreadSummary>> {
+  const requests = pendingSubagentRequestsByThread(threads);
+  let next: Record<string, ThreadSummary> | null = null;
+  for (const thread of Object.values(threads)) {
+    const request = requests.get(thread.id) ?? null;
+    if (thread.pendingSubagentRequest === request) continue;
+    next ??= { ...threads };
+    next[thread.id] = { ...thread, pendingSubagentRequest: request };
+  }
+  return next ?? threads;
 }
 
 /** Keeps a resolved repository identity when an update arrives without one (same root). */
@@ -188,7 +231,12 @@ export function applyShellSnapshot(state: ShellState, item: ShellSnapshotItem): 
     threads[thread.id] = toThreadSummary(thread, "archive");
   }
   for (const thread of snapshot.threads) threads[thread.id] = toThreadSummary(thread, "active");
-  return { ...state, sequence: snapshot.snapshotSequence, projects, threads };
+  return {
+    ...state,
+    sequence: snapshot.snapshotSequence,
+    projects,
+    threads: withSubagentRequests(threads),
+  };
 }
 
 function without<T>(record: Readonly<Record<string, T>>, key: string): Readonly<Record<string, T>> {
@@ -218,10 +266,10 @@ export function applyShellEvent(state: ShellState, item: ShellEventItem): ShellS
     case "thread.updated":
       return {
         ...base,
-        threads: {
+        threads: withSubagentRequests({
           ...state.threads,
           [item.thread.id]: toThreadSummary(item.thread, item.location),
-        },
+        }),
       };
     case "thread.removed": {
       // Archiving can arrive as "removed from active" next to "updated in
@@ -230,7 +278,11 @@ export function applyShellEvent(state: ShellState, item: ShellEventItem): ShellS
       if (existing !== undefined && (existing.archived ? "archive" : "active") !== item.location) {
         return base;
       }
-      return { ...base, threads: without(state.threads, item.threadId) };
+      const threads = without(state.threads, item.threadId);
+      return {
+        ...base,
+        threads: threads === state.threads ? threads : withSubagentRequests(threads),
+      };
     }
     default:
       item satisfies never;
