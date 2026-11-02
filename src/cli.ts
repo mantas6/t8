@@ -14,30 +14,39 @@ import {
   type OrchestrationV2ThreadStreamItem,
   type OrchestrationV2TurnItem,
   ProjectId,
+  ProviderApprovalDecision,
   ProviderInstanceId,
+  ProviderUserInputAnswers,
   RunId,
   RuntimeMode,
+  RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
+import { createEffect, createRoot } from "solid-js";
 
 import {
   archiveThread,
   createThread,
   type DeliveryIntent,
   interruptRun,
+  type RuntimeRequestResponse,
+  respondToRequest,
   sendMessage,
 } from "./commands.ts";
 import { ConfigError, loadConfig, type ResolvedConfig } from "./config.ts";
 import * as ConnectionModule from "./connection/connection.ts";
 import { Connection, describeStatus } from "./connection/connection.ts";
 import { fetchEnvironment, summarizeEnvironment } from "./connection/environment.ts";
+import * as StateSyncModule from "./state/sync.ts";
+import type { DisplayItem, PendingRequest } from "./state/types.ts";
 
 const USAGE = `t3tui-cli: headless client for a T3 Code server
 
@@ -48,6 +57,10 @@ Commands:
   shell                        Print projects and threads, then stream shell events
   tail <threadId>              Print a thread snapshot, then stream its events
        [--until-idle]          Exit once an active run has finished
+  watch <threadId>             Drive the client state store; print the derived
+                               transcript and pending requests on each change
+       [--until-idle]          Exit once an active run has finished
+       [--verbose]             Print full tool output and message text
   send <threadId> <text...>    Send a message
        [--intent auto|steer|restart|queue]
   interrupt <threadId>         Stop the thread's active work
@@ -55,6 +68,10 @@ Commands:
   create <projectId>           Create an empty thread, print its id
        [--title <title>] [--provider <instanceId> --model <model>]
        [--runtime-mode approval-required|auto-accept-edits|auto|full-access]
+  respond <threadId> <requestId>
+       --decision accept|acceptForSession|acceptAlways|decline|cancel
+       | --answers '<json object>'
+                               Answer a pending runtime request
   archive <threadId>           Archive a thread
 
 Options:
@@ -474,6 +491,108 @@ const tailCommand = (threadId: ThreadId, mode: OutputMode, untilIdle: boolean) =
       );
   }).pipe(Effect.scoped);
 
+function displayLine(item: DisplayItem, verbose: boolean): string {
+  const text = (value: string) => (verbose ? value : snippet(value));
+  switch (item.kind) {
+    case "user_message":
+      return `[user] ${text(item.text)}`;
+    case "assistant_message":
+      return `[assistant${item.streaming ? " streaming" : ""}] ${text(item.text)}`;
+    case "tool_call": {
+      const head = `[tool ${item.tool}:${item.name} ${item.status}${item.exitCode === null ? "" : ` exit=${item.exitCode}`}${item.failed ? " failed" : ""}] ${text(item.args)}`;
+      if (item.result === null) return item.resultOmitted ? `${head} (output omitted)` : head;
+      return `${head} => ${text(item.result)}`;
+    }
+    case "reasoning":
+      return `[reasoning${item.streaming ? " streaming" : ""}] ${text(item.text)}`;
+    case "plan":
+      return `[plan ${item.planKind} ${item.status}] ${text(item.markdown ?? item.steps.map((step) => `${step.status}:${step.text}`).join("; "))}`;
+    case "subagent":
+      return `[subagent ${item.status}] ${text(item.title ?? item.prompt)}`;
+    case "request":
+      return `[request ${item.requestType}:${item.requestKind} ${item.open ? "open" : (item.resolution ?? item.status)}] ${text(item.prompt ?? "")}`;
+    case "checkpoint":
+      return `[checkpoint] ${item.files.length} file(s)`;
+    case "error":
+      return `[error ${item.label}] ${text(item.message)}`;
+    case "notice":
+      return `[${item.noticeType}] ${text(item.text)}`;
+  }
+}
+
+function pendingLine(request: PendingRequest): string {
+  switch (request.type) {
+    case "approval":
+      return `approval ${request.requestId} kind=${request.requestKind} capability=${request.responseCapability} subject=${JSON.stringify(request.subject)} prompt=${JSON.stringify(request.prompt)} options=${request.options.map((option) => option.decision).join(",")}`;
+    case "user_input":
+      return `user_input ${request.requestId} capability=${request.responseCapability} questions=${JSON.stringify(request.questions.map((q) => ({ id: q.id, question: q.question, options: q.options.map((o) => o.label) })))}`;
+    case "other":
+      return `${request.requestKind} ${request.requestId} capability=${request.responseCapability}`;
+  }
+}
+
+const watchCommand = (threadId: ThreadId, mode: OutputMode, untilIdle: boolean, verbose: boolean) =>
+  Effect.gen(function* () {
+    yield* logStatus;
+    const sync = yield* StateSyncModule.make({ onError: (message) => info(`[sync] ${message}`) });
+    const idle = yield* Deferred.make<void>();
+    const store = sync.thread;
+    let previous = "";
+    let sawActiveRun = false;
+    const disposeRoot = createRoot((dispose) => {
+      createEffect(() => {
+        const transcript = store.transcript();
+        const pending = store.pendingRequests();
+        const activeRun = store.activeRun();
+        const queue = store.queue();
+        const { phase, sequence } = store.state;
+        // Printed when anything but the sequence changed.
+        let body: string;
+        if (mode === "text") {
+          body = [
+            `${phase}${store.state.thread?.archivedAt ? " (archived)" : ""} run=${activeRun === null ? "idle" : `#${activeRun.ordinal}:${activeRun.status}`} pending=${pending.length} queued=${queue.length}`,
+            ...transcript.map((item) => `  ${displayLine(item, verbose)}`),
+            ...pending.map((request) => `  ! ${pendingLine(request)}`),
+            ...queue.map((run) => `  queued #${run.ordinal}: ${snippet(run.text ?? "")}`),
+          ].join("\n");
+        } else {
+          body = JSON.stringify({
+            phase,
+            activeRun:
+              activeRun === null
+                ? null
+                : { id: activeRun.id, ordinal: activeRun.ordinal, status: activeRun.status },
+            transcript,
+            pendingRequests: pending,
+            queue,
+          });
+        }
+        if (body !== previous) {
+          previous = body;
+          line(
+            mode === "text"
+              ? `--- #${sequence ?? "-"} ${body}`
+              : `{"sequence":${sequence ?? "null"},${body.slice(1)}`,
+          );
+        }
+        if (activeRun !== null) sawActiveRun = true;
+        if (
+          untilIdle &&
+          phase === "ready" &&
+          sawActiveRun &&
+          activeRun === null &&
+          queue.length === 0
+        ) {
+          Effect.runFork(Deferred.succeed(idle, undefined));
+        }
+      });
+      return dispose;
+    });
+    yield* Effect.addFinalizer(() => Effect.sync(disposeRoot));
+    yield* sync.openThread(threadId);
+    yield* untilIdle ? Deferred.await(idle) : Effect.never;
+  }).pipe(Effect.scoped);
+
 const oneShot = <A, E>(
   effect: Effect.Effect<A, E, Connection>,
   render: (result: A) => unknown,
@@ -501,6 +620,9 @@ function parse(argv: ReadonlyArray<string>) {
       raw: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
       "until-idle": { type: "boolean", default: false },
+      verbose: { type: "boolean", default: false },
+      decision: { type: "string" },
+      answers: { type: "string" },
       intent: { type: "string", default: "auto" },
       run: { type: "string" },
       title: { type: "string" },
@@ -562,6 +684,37 @@ async function main(): Promise<number> {
           values["until-idle"],
         );
         break;
+      case "watch":
+        program = watchCommand(
+          ThreadId.make(requireArg(args[0], "threadId")),
+          mode,
+          values["until-idle"],
+          values.verbose,
+        );
+        break;
+      case "respond": {
+        const threadId = ThreadId.make(requireArg(args[0], "threadId"));
+        const requestId = RuntimeRequestId.make(requireArg(args[1], "requestId"));
+        if ((values.decision === undefined) === (values.answers === undefined)) {
+          throw new UsageError("give exactly one of --decision or --answers");
+        }
+        let response: RuntimeRequestResponse;
+        if (values.decision !== undefined) {
+          response = {
+            decision: Schema.decodeUnknownSync(ProviderApprovalDecision)(values.decision),
+          };
+        } else {
+          let parsedAnswers: unknown;
+          try {
+            parsedAnswers = JSON.parse(values.answers ?? "");
+          } catch {
+            throw new UsageError("--answers must be a JSON object");
+          }
+          response = { answers: Schema.decodeUnknownSync(ProviderUserInputAnswers)(parsedAnswers) };
+        }
+        program = oneShot(respondToRequest(threadId, requestId, response), (r) => r, mode);
+        break;
+      }
       case "send": {
         const threadId = ThreadId.make(requireArg(args[0], "threadId"));
         const text = requireArg(args.slice(1).join(" "), "text");

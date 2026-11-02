@@ -13,8 +13,9 @@ Built with [Bun](https://bun.com), [Effect](https://effect.website),
 ## Status
 
 Early development. There is a connection layer (auth, version gate, pings,
-reconnect), typed command helpers and a headless CLI; the TUI itself is still a
-smoke test. Targets T3 Code server **v0.1.2** (orchestration protocol 2).
+reconnect), typed command helpers, a client state layer (Solid stores fed by
+pure reducers over the server's event stream) and a headless CLI; the TUI
+itself is still a smoke test. Targets T3 Code server **v0.1.2** (orchestration protocol 2).
 
 ## Running
 
@@ -60,7 +61,9 @@ bun run cli env                         # server version and protocol check
 bun run cli shell                       # projects + threads, then live shell events
 bun run cli tail <threadId>             # thread snapshot, then live events
 bun run cli tail <threadId> --until-idle
+bun run cli watch <threadId>            # client-side transcript + pending requests, live
 bun run cli send <threadId> "text"      # --intent auto|steer|restart|queue
+bun run cli respond <threadId> <requestId> --decision accept   # or --answers '{"q1":"yes"}'
 bun run cli interrupt <threadId>        # --run <runId> for one run
 bun run cli create <projectId> --title "..." --provider <instanceId> --model <model>
 bun run cli archive <threadId>
