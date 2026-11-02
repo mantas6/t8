@@ -26,6 +26,7 @@ import {
   type RuntimeMode,
   type RuntimeRequestId,
   ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -263,4 +264,14 @@ export const setRuntimeMode = Effect.fn("commands.setRuntimeMode")(function* (
 
 export const archiveThread = Effect.fn("commands.archiveThread")(function* (threadId: ThreadId) {
   return yield* dispatch({ type: "thread.archive", commandId: newCommandId(), threadId });
+});
+
+/** Fetches one turn item in full, including output the stream withheld (`resultOmitted`). */
+export const fetchTurnItem = Effect.fn("commands.fetchTurnItem")(function* (
+  threadId: ThreadId,
+  itemId: TurnItemId,
+) {
+  const { client } = yield* (yield* Connection).session;
+  const result = yield* client[ORCHESTRATION_V2_WS_METHODS.getTurnItem]({ threadId, itemId });
+  return result.item;
 });

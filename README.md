@@ -14,8 +14,11 @@ Built with [Bun](https://bun.com), [Effect](https://effect.website),
 
 Early development. There is a connection layer (auth, version gate, pings,
 reconnect), typed command helpers, a client state layer (Solid stores fed by
-pure reducers over the server's event stream) and a headless CLI; the TUI
-itself is still a smoke test. Targets T3 Code server **v0.1.2** (orchestration protocol 2).
+pure reducers over the server's event stream), a headless CLI, and the core of
+the TUI: a full-screen transcript of one thread with vim-style keys, a
+message input and approval prompts. There is no thread picker yet: open a
+thread with `--thread <id>` (find ids with `bun run cli shell`). Targets T3
+Code server **v0.1.2** (orchestration protocol 2).
 
 ## Running
 
@@ -29,9 +32,60 @@ bun install
 bun run probe                         # defaults to http://localhost:3773
 bun run probe http://host:3773
 
-# Start the TUI (currently a smoke test; press q or Ctrl-C to quit)
-bun run dev
+# Start the TUI
+bun run dev --thread <threadId>       # also --server <url>, --token-file <path>
 ```
+
+### The TUI
+
+One full-screen surface: a status line on top (mode, project, branch, thread,
+model, run status, connection), the transcript in the middle, and the message
+input at the bottom with a hint line under it. When the agent asks for an
+approval or has a question, the input is replaced by the request so it cannot
+be missed. A banner appears under the status line while disconnected.
+
+Keys are modal, like vim. Counts work (`5j`, `3<C-f>`), as do two-key
+sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
+
+| NORMAL (transcript)         |                                                   |
+| --------------------------- | ------------------------------------------------- |
+| `j` `k` / `Ctrl-e` `Ctrl-y` | scroll one line                                   |
+| `Ctrl-d` `Ctrl-u`           | scroll half a page (`Ctrl-d` never quits)         |
+| `Ctrl-f` `Ctrl-b`           | scroll a page                                     |
+| `gg` / `G`                  | top / bottom (`G` turns tail-follow back on)      |
+| `]]` `[[`                   | next / previous message                           |
+| `]t` `[t`                   | next / previous tool call                         |
+| `za` or `Tab` / `zM` / `zR` | fold the focused item / fold all / unfold all     |
+| `i` `a` / `o`               | write a message (keep draft / start empty)        |
+| `y`                         | copy the focused message (OSC 52, works over SSH) |
+| `x`                         | interrupt the run                                 |
+| `gt` `gT`                   | next / previous thread in the project             |
+| `/` then `n` `N`            | search the transcript, next / previous match      |
+| `:`                         | command line: `:q`, `:a` (approve), `:d` (deny)   |
+| `?`                         | help                                              |
+| `Ctrl-c`                    | interrupt the run; twice within a second quits    |
+
+| INSERT (message input)               |                                              |
+| ------------------------------------ | -------------------------------------------- |
+| `Enter`                              | send                                         |
+| `Shift-Enter`, `Ctrl-j`, `Alt-Enter` | newline                                      |
+| `Ctrl-s`                             | send as steer (into the running turn)        |
+| `Esc` / `Ctrl-c`                     | back to NORMAL / clear the draft and go back |
+| `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b`  | scroll the transcript                        |
+
+| Pending request |                                                      |
+| --------------- | ---------------------------------------------------- |
+| `y` / `n`       | approve / deny                                       |
+| `1`-`9`         | pick an option or answer                             |
+| `Esc` / `Enter` | leave the request (it stays visible) / go back to it |
+
+The transcript follows new output while you are at the bottom; scrolling up
+stops that, and reaching the bottom again (or `G`, or sending) resumes it.
+Tool calls and reasoning are folded to one line; unfolding a tool call whose
+output the server did not stream fetches it. `Shift-Enter` needs a terminal
+with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty);
+elsewhere use `Ctrl-j` or `Alt-Enter`. Inside tmux, OSC 52 needs
+`set -g set-clipboard on` (or `allow-passthrough on`).
 
 ### Configuration
 
