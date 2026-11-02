@@ -1,5 +1,5 @@
 {
-  description = "t3tui - terminal UI client for the T3 Code server";
+  description = "t8 - terminal UI client for the T3 Code server";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -25,23 +25,23 @@
     in
     {
       packages = forPackageSystems (pkgs: rec {
-        t3tui = pkgs.callPackage ./nix/package.nix { };
-        default = t3tui;
+        t8 = pkgs.callPackage ./nix/package.nix { };
+        default = t8;
       });
 
       apps = forPackageSystems (pkgs: rec {
-        t3tui = {
+        t8 = {
           type = "app";
-          program = pkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.t3tui;
+          program = pkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.t8;
           meta.description = "Terminal UI client for the T3 Code server";
         };
-        default = t3tui;
+        default = t8;
       });
 
       checks = forPackageSystems (pkgs: {
-        t3tui = self.packages.${pkgs.stdenv.hostPlatform.system}.t3tui;
+        t8 = self.packages.${pkgs.stdenv.hostPlatform.system}.t8;
 
-        formatting = pkgs.runCommand "t3tui-nix-formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
+        formatting = pkgs.runCommand "t8-nix-formatting" { nativeBuildInputs = [ pkgs.nixfmt ]; } ''
           nixfmt --check ${./flake.nix} ${./nix}/*.nix
           touch $out
         '';

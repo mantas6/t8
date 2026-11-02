@@ -31,7 +31,7 @@ import {
 
 describe("fuzzyMatch", () => {
   test("subsequence, case-insensitive", () => {
-    expect(fuzzyMatch("t3t", "T3 TUI")).not.toBeNull();
+    expect(fuzzyMatch("t3t", "T3 Tui")).not.toBeNull();
     expect(fuzzyMatch("abc", "a-b-c")?.positions).toEqual([0, 2, 4]);
     expect(fuzzyMatch("xyz", "t3tui")).toBeNull();
     expect(fuzzyMatch("toolong", "short")).toBeNull();
@@ -220,9 +220,9 @@ const groups: ReadonlyArray<ProjectGroup> = [
     title: "t8",
     lastActivityAt: NOW,
     threads: [
-      summary("a", "p1", "t3tui step4 live", { status: "running" }),
+      summary("a", "p1", "t8 step4 live", { status: "running" }),
       summary("b", "p1", "Fix the build", { archived: true }),
-      summary("c", "p1", "t3tui smoke test"),
+      summary("c", "p1", "t8 smoke test"),
     ],
   },
   {
@@ -254,9 +254,9 @@ describe("thread picker rows", () => {
     ]);
     const text = (index: number) =>
       (all.rows[index]?.segments ?? []).map((segment) => segment.text).join("");
-    expect(text(1)).toMatch(/^1 ● t3tui step4 live/);
+    expect(text(1)).toMatch(/^1 ● t8 step4 live/);
     expect(text(2)).toMatch(/^- × Fix the build/);
-    expect(text(3)).toMatch(/^2 · t3tui smoke test/);
+    expect(text(3)).toMatch(/^2 · t8 smoke test/);
     expect(text(3)).toContain("1m");
 
     const filtered = buildThreadRows(groups, {

@@ -69,7 +69,7 @@ export class StateSync extends Context.Service<
     /** Empties both stores and reconnects to another server. */
     readonly switchServer: (target: ResolvedConfig) => Effect.Effect<void>;
   }
->()("t3tui/StateSync") {}
+>()("t8/StateSync") {}
 
 function describe(cause: unknown): string {
   if (cause instanceof Error) return cause.message;

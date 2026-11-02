@@ -40,7 +40,7 @@ const SHELL = shellSnapshot(
   [projectShell(PROJECT_ID, "t8"), projectShell("project-web", "website")],
   [
     threadShell(THREAD_ID, PROJECT_ID, {
-      title: "t3tui smoke test",
+      title: "t8 smoke test",
       latestUserMessageAt: "2026-11-02T07:00:00.000Z",
     }),
     threadShell("thread-build", PROJECT_ID, { title: "Fix the build", status: "running" }),
@@ -222,7 +222,7 @@ describe("App", () => {
     expect(app.calls.opened).toEqual([THREAD_ID]);
     const frame = await app.frame();
     expect(frame).toContain("Reply with the single word OK.");
-    expect(frame).toContain("t3tui smoke test");
+    expect(frame).toContain("t8 smoke test");
     expect(frame).not.toContain(NO_THREAD_PLACEHOLDER);
   });
 
@@ -295,7 +295,7 @@ describe("App", () => {
     const picker = await command(app, "t");
     expect(picker).toContain("Threads");
     expect(picker).toContain("PICKER");
-    expect(picker).toMatch(/1 · t3tui smoke test/);
+    expect(picker).toMatch(/1 · t8 smoke test/);
     expect(picker).toMatch(/2 ● Fix the build/);
     expect(picker).toMatch(/3 · Landing page copy/);
     expect(picker).toContain("website");
@@ -433,7 +433,7 @@ describe("App", () => {
   test(":archive asks first", async () => {
     const app = await mount(THREAD_ID);
     await app.frame();
-    expect(await command(app, "archive")).toContain('archive "t3tui smoke test"?');
+    expect(await command(app, "archive")).toContain('archive "t8 smoke test"?');
     app.mockInput.pressKey("y");
     await app.frame();
     expect(app.calls.archived).toEqual([THREAD_ID]);

@@ -96,7 +96,7 @@ describe("token exchange", () => {
       subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
       requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
       scope: "orchestration:read orchestration:operate",
-      client_label: "t3tui",
+      client_label: "t8",
       client_device_type: "desktop",
       client_os: "Linux",
     });
@@ -184,7 +184,7 @@ const server = Bun.serve({
   },
 });
 const base = `http://127.0.0.1:${server.port}`;
-const directory = mkdtempSync(join(tmpdir(), "t3tui-pairing-test-"));
+const directory = mkdtempSync(join(tmpdir(), "t8-pairing-test-"));
 afterAll(() => {
   server.stop(true);
   rmSync(directory, { recursive: true, force: true });
@@ -206,7 +206,7 @@ describe("pair", () => {
     expect(redeemed.at(-1)).toMatchObject({
       subject_token: "good-1",
       scope: "orchestration:read orchestration:operate",
-      client_label: "t3tui",
+      client_label: "t8",
       client_device_type: "desktop",
     });
     const second = await run(pair({ pairingUrl: `${base}/pair#token=good-1` }));
@@ -244,11 +244,11 @@ describe("connectAndSave", () => {
       label: "Fake Box",
       environmentId: "env-fake",
     });
-    const tokenPath = join(directory, "t3tui", "fake-box.token");
+    const tokenPath = join(directory, "t8", "fake-box.token");
     expect(saved.tokenPath).toBe(tokenPath);
     expect(readFileSync(tokenPath, "utf8")).toBe("access-for-good-3\n");
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
-    const file = await readConfigFile(join(directory, "t3tui", "config.json"));
+    const file = await readConfigFile(join(directory, "t8", "config.json"));
     expect(file?.default).toBe("fake-box");
     expect(file?.servers["fake-box"]).toMatchObject({
       server: `${base}/`,
@@ -278,7 +278,7 @@ describe("connectAndSave", () => {
 
     const forgotten = await forgetProfile("second", { ...env, PATH: "" });
     expect(forgotten).toMatchObject({ token: "deleted", newDefault: "fake-box" });
-    const after = await readConfigFile(join(directory, "t3tui", "config.json"));
+    const after = await readConfigFile(join(directory, "t8", "config.json"));
     expect(Object.keys(after?.servers ?? {})).toEqual(["fake-box"]);
   });
 });

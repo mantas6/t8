@@ -132,7 +132,7 @@ export class Connection extends Context.Service<
      */
     readonly forceReconnect: Effect.Effect<void>;
   }
->()("t3tui/Connection") {}
+>()("t8/Connection") {}
 
 /** Transport-level failures, i.e. the socket went away. */
 export function isTransportError(error: unknown): error is RpcClientError.RpcClientError {
@@ -229,7 +229,7 @@ export function rejectedTokenAdvice(
   now: number = Date.now(),
 ): string {
   const profile = config?.profile ?? null;
-  const reconnect = "run `t3tui connect` with a new pairing link";
+  const reconnect = "run `t8 connect` with a new pairing link";
   if (profile === null)
     return `it may have expired or been revoked; ${reconnect}, or fix the token file`;
   if (isExpired(profile.expiresAt, now)) {

@@ -1,6 +1,6 @@
 /**
  * Saved server profiles: `connect` (pair with a server and save it),
- * `servers` (list) and `forget` (remove). Shared by `t3tui` (`main.tsx`), the
+ * `servers` (list) and `forget` (remove). Shared by `t8` (`main.tsx`), the
  * headless CLI (`cli.ts`) and the TUI's `:connect` / `:servers`.
  */
 import { homedir } from "node:os";
@@ -249,7 +249,7 @@ export function describeSaved(saved: SavedConnection): ReadonlyArray<string> {
   }
   if (!saved.isDefault && saved.defaultName !== undefined) {
     lines.push(
-      `The default profile is still "${saved.defaultName}": run t3tui -p ${saved.name}, or connect again with --default.`,
+      `The default profile is still "${saved.defaultName}": run t8 -p ${saved.name}, or connect again with --default.`,
     );
   }
   return lines;

@@ -18,7 +18,7 @@ const server = Bun.serve({
   port: 0,
   fetch: () => new Response("not here", { status: 404 }),
 });
-const directory = mkdtempSync(join(tmpdir(), "t3tui-connection-test-"));
+const directory = mkdtempSync(join(tmpdir(), "t8-connection-test-"));
 afterAll(() => {
   server.stop(true);
   rmSync(directory, { recursive: true, force: true });

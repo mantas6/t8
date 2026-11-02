@@ -68,13 +68,13 @@ describe("normalizeServerUrl", () => {
 
 describe("configDirFor", () => {
   test("uses XDG_CONFIG_HOME when absolute", () => {
-    expect(configDirFor({ XDG_CONFIG_HOME: "/xdg" }, HOME)).toBe("/xdg/t3tui");
+    expect(configDirFor({ XDG_CONFIG_HOME: "/xdg" }, HOME)).toBe("/xdg/t8");
   });
 
   test("ignores empty or relative XDG_CONFIG_HOME", () => {
-    expect(configDirFor({}, HOME)).toBe("/home/user/.config/t3tui");
-    expect(configDirFor({ XDG_CONFIG_HOME: "" }, HOME)).toBe("/home/user/.config/t3tui");
-    expect(configDirFor({ XDG_CONFIG_HOME: "rel" }, HOME)).toBe("/home/user/.config/t3tui");
+    expect(configDirFor({}, HOME)).toBe("/home/user/.config/t8");
+    expect(configDirFor({ XDG_CONFIG_HOME: "" }, HOME)).toBe("/home/user/.config/t8");
+    expect(configDirFor({ XDG_CONFIG_HOME: "rel" }, HOME)).toBe("/home/user/.config/t8");
   });
 });
 
@@ -83,7 +83,7 @@ describe("resolveConfig", () => {
     const config = resolveConfig({ flags: {}, env: {}, homeDir: HOME });
     expect(config.serverUrl).toBe(`${DEFAULT_SERVER_URL}/`);
     expect(config.wsUrl).toBe("ws://localhost:3773/ws?orchestrationProtocol=2");
-    expect(config.token).toEqual({ kind: "file", path: "/home/user/.config/t3tui/token" });
+    expect(config.token).toEqual({ kind: "file", path: "/home/user/.config/t8/token" });
   });
 
   test("config file values, relative tokenFile resolves against the config dir", () => {
@@ -94,7 +94,7 @@ describe("resolveConfig", () => {
       file: legacy({ server: "https://file.example", tokenFile: "secrets/tok" }),
     });
     expect(config.serverUrl).toBe("https://file.example/");
-    expect(config.token).toEqual({ kind: "file", path: "/xdg/t3tui/secrets/tok" });
+    expect(config.token).toEqual({ kind: "file", path: "/xdg/t8/secrets/tok" });
   });
 
   test("config file tokenFile may use ~ or be absolute", () => {
@@ -117,7 +117,7 @@ describe("resolveConfig", () => {
   test("env beats config file", () => {
     const config = resolveConfig({
       flags: {},
-      env: { T3TUI_SERVER: "http://env:1", T3TUI_TOKEN_FILE: "/env/token" },
+      env: { T8_SERVER: "http://env:1", T8_TOKEN_FILE: "/env/token" },
       homeDir: HOME,
       file: legacy({ server: "http://file:2", tokenFile: "file-token" }),
     });
@@ -125,10 +125,10 @@ describe("resolveConfig", () => {
     expect(config.token).toEqual({ kind: "file", path: "/env/token" });
   });
 
-  test("T3TUI_TOKEN beats T3TUI_TOKEN_FILE", () => {
+  test("T8_TOKEN beats T8_TOKEN_FILE", () => {
     const config = resolveConfig({
       flags: {},
-      env: { T3TUI_TOKEN: " secret ", T3TUI_TOKEN_FILE: "/env/token" },
+      env: { T8_TOKEN: " secret ", T8_TOKEN_FILE: "/env/token" },
       homeDir: HOME,
     });
     expect(config.token).toEqual({ kind: "env", token: "secret" });
@@ -137,7 +137,7 @@ describe("resolveConfig", () => {
   test("flags beat env and config file", () => {
     const config = resolveConfig({
       flags: { server: "https://flag:3", tokenFile: "/flag/token" },
-      env: { T3TUI_SERVER: "http://env:1", T3TUI_TOKEN: "secret" },
+      env: { T8_SERVER: "http://env:1", T8_TOKEN: "secret" },
       homeDir: HOME,
       file: legacy({ server: "http://file:2", tokenFile: "file-token" }),
     });
@@ -149,7 +149,7 @@ describe("resolveConfig", () => {
   test("blank values fall through", () => {
     const config = resolveConfig({
       flags: { server: "  " },
-      env: { T3TUI_SERVER: "" },
+      env: { T8_SERVER: "" },
       homeDir: HOME,
       file: legacy({ server: "http://file:2" }),
     });
@@ -223,18 +223,18 @@ describe("profiles", () => {
       file,
     });
     expect(config.serverUrl).toBe("http://home:3773/");
-    expect(config.token).toEqual({ kind: "file", path: "/xdg/t3tui/home.token" });
+    expect(config.token).toEqual({ kind: "file", path: "/xdg/t8/home.token" });
     expect(config.profile).toEqual({ name: "home", label: "ag" });
   });
 
-  test("--profile beats T3TUI_PROFILE beats the default", () => {
-    const byEnv = resolveConfig({ flags: {}, env: { T3TUI_PROFILE: "work" }, homeDir: HOME, file });
+  test("--profile beats T8_PROFILE beats the default", () => {
+    const byEnv = resolveConfig({ flags: {}, env: { T8_PROFILE: "work" }, homeDir: HOME, file });
     expect(byEnv.serverUrl).toBe("https://work.example/");
     expect(byEnv.token).toEqual({ kind: "file", path: "/secrets/work" });
     expect(byEnv.profile?.expiresAt).toBe("2030-01-01T00:00:00.000Z");
     const byFlag = resolveConfig({
       flags: { profile: "home" },
-      env: { T3TUI_PROFILE: "work" },
+      env: { T8_PROFILE: "work" },
       homeDir: HOME,
       file,
     });
@@ -244,7 +244,7 @@ describe("profiles", () => {
   test("flags and env still override the profile's server and token", () => {
     const config = resolveConfig({
       flags: { profile: "work", server: "http://flag:1" },
-      env: { T3TUI_TOKEN: "secret" },
+      env: { T8_TOKEN: "secret" },
       homeDir: HOME,
       file,
     });
@@ -309,7 +309,7 @@ describe("profiles", () => {
     const next = withProfile(old, plan.name, { server: "http://h/", tokenFile: "ag.token" }, false);
     expect(next.default).toBe("default");
     const config = resolveConfig({ flags: {}, env: {}, homeDir: HOME, file: next });
-    expect(config.token).toEqual({ kind: "file", path: "/home/user/.config/t3tui/token" });
+    expect(config.token).toEqual({ kind: "file", path: "/home/user/.config/t8/token" });
     expect(parseConfigFile(JSON.parse(serializeConfigFile(next)), "c").legacy).toBeUndefined();
   });
 
@@ -330,8 +330,8 @@ describe("profiles", () => {
   });
 
   test("storedTokenPath is relative inside the config dir", () => {
-    expect(storedTokenPath("/c/t3tui", "/c/t3tui/home.token")).toBe("home.token");
-    expect(storedTokenPath("/c/t3tui", "/elsewhere/t")).toBe("/elsewhere/t");
+    expect(storedTokenPath("/c/t8", "/c/t8/home.token")).toBe("home.token");
+    expect(storedTokenPath("/c/t8", "/elsewhere/t")).toBe("/elsewhere/t");
   });
 
   test("expiry helpers", () => {
@@ -351,26 +351,26 @@ describe("profiles", () => {
     ]);
   });
 
-  test("a rejected token points at t3tui connect", () => {
+  test("a rejected token points at t8 connect", () => {
     const now = Date.parse("2026-11-02T00:00:00.000Z");
-    expect(rejectedTokenAdvice({ profile: null }, now)).toContain("t3tui connect");
+    expect(rejectedTokenAdvice({ profile: null }, now)).toContain("t8 connect");
     expect(
       rejectedTokenAdvice(
         { profile: { name: "home", expiresAt: "2026-10-01T00:00:00.000Z" } },
         now,
       ),
     ).toBe(
-      'the token saved for profile "home" expired on 2026-10-01; run `t3tui connect` with a new pairing link',
+      'the token saved for profile "home" expired on 2026-10-01; run `t8 connect` with a new pairing link',
     );
   });
 });
 
 describe("config files on disk", () => {
-  const directory = mkdtempSync(join(tmpdir(), "t3tui-config-test-"));
+  const directory = mkdtempSync(join(tmpdir(), "t8-config-test-"));
   afterAll(() => rmSync(directory, { recursive: true, force: true }));
 
   test("writes atomically with mode 600 and reads back", async () => {
-    const configDir = join(directory, "t3tui");
+    const configDir = join(directory, "t8");
     await writeConfigFile(configDir, { default: "a", servers: { a: { server: "http://a/" } } });
     const path = join(configDir, "config.json");
     expect(statSync(path).mode & 0o777).toBe(0o600);

@@ -29,7 +29,7 @@ describe("parseCommandLine", () => {
 
   test("pickers and thread commands", () => {
     expect(parseCommandLine("t")).toEqual({ type: "threads", filter: "" });
-    expect(parseCommandLine("threads t3tui")).toEqual({ type: "threads", filter: "t3tui" });
+    expect(parseCommandLine("threads t8")).toEqual({ type: "threads", filter: "t8" });
     expect(parseCommandLine("p")).toEqual({ type: "projects", name: "" });
     expect(parseCommandLine("projects  my app ")).toEqual({ type: "projects", name: "my app" });
     expect(parseCommandLine("n")).toEqual({ type: "new", title: null });

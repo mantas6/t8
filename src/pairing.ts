@@ -41,12 +41,12 @@ const PAIRING_TOKEN_PARAM = "token";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const SUPPORTED_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
 
-/** What t3tui asks for: reading threads, and operating them (send, approve, ...). */
+/** What t8 asks for: reading threads, and operating them (send, approve, ...). */
 export const PAIRING_SCOPES: ReadonlyArray<AuthEnvironmentScope> = [
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
 ];
-export const CLIENT_LABEL = "t3tui";
+export const CLIENT_LABEL = "t8";
 /** A terminal client runs on a computer; "desktop" is the closest device type. */
 export const CLIENT_DEVICE_TYPE: AuthClientMetadataDeviceType = "desktop";
 
@@ -64,7 +64,7 @@ export type PairingFailure =
   | "incompatible"
   /** The server did not accept the credential: expired, used, revoked or unknown. */
   | "rejected"
-  /** The link does not grant the scopes t3tui needs. */
+  /** The link does not grant the scopes t8 needs. */
   | "scope"
   /** The server failed, or answered something unexpected. */
   | "server";
@@ -216,7 +216,7 @@ export function describeTokenExchangeFailure(status: number, body: unknown): Pai
           reason: "scope",
           message:
             error.reason === "scope_not_granted"
-              ? `the pairing link does not grant orchestration access (t3tui needs orchestration:read, and orchestration:operate to send messages); the link was not used up. Create one with those scopes, e.g. \`t3 pair --scope orchestration:read --scope orchestration:operate\`.`
+              ? `the pairing link does not grant orchestration access (t8 needs orchestration:read, and orchestration:operate to send messages); the link was not used up. Create one with those scopes, e.g. \`t3 pair --scope orchestration:read --scope orchestration:operate\`.`
               : `the server rejected the request (${error.reason}).`,
         });
       case "EnvironmentInternalError":
@@ -302,7 +302,7 @@ export const redeemPairingCredential = (
     if (result.token_type !== "Bearer") {
       return yield* new PairingError({
         reason: "server",
-        message: `the server issued a ${result.token_type} token; t3tui only supports bearer tokens.`,
+        message: `the server issued a ${result.token_type} token; t8 only supports bearer tokens.`,
       });
     }
     return {

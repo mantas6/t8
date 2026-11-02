@@ -22,7 +22,7 @@ const PROPERTY = "#e06c75";
 /** Fence language, code, and a token with the color it must get. */
 const BLOCKS: ReadonlyArray<readonly [lang: string, code: string, token: string, fg: string]> = [
   ["php", "<?php\nfunction add(int $a): int { return $a; }", "function", KEYWORD],
-  ["nix", '{ pkgs }:\nlet name = "t3tui"; in name', "let", KEYWORD],
+  ["nix", '{ pkgs }:\nlet name = "t8"; in name', "let", KEYWORD],
   ["bash", 'if [ -n "$x" ]; then echo hi; fi', "then", KEYWORD],
   ["sh", "printf '%s' ok", "printf", FUNCTION],
   ["go", 'package main\nfunc main() { println("go") }', "func", KEYWORD],

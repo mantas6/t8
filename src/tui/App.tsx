@@ -1869,7 +1869,7 @@ export function App(props: AppProps) {
       <Show when={otherRequest()}>
         {(request: Accessor<PendingOtherRequest>) => (
           <text fg={colors.warn} flexShrink={0}>
-            {` pending ${request().requestKind} request (cannot be answered from t3tui)`}
+            {` pending ${request().requestKind} request (cannot be answered from t8)`}
           </text>
         )}
       </Show>

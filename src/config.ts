@@ -2,7 +2,7 @@
  * Client configuration: which server to talk to and where the bearer token
  * lives.
  *
- * `$XDG_CONFIG_HOME/t3tui/config.json` (default `~/.config/t3tui/config.json`)
+ * `$XDG_CONFIG_HOME/t8/config.json` (default `~/.config/t8/config.json`)
  * holds named server profiles:
  *
  *   { "default": "home",
@@ -16,9 +16,9 @@
  *
  * Resolution order, highest priority first:
  *   1. CLI flags `--server <url>` and `--token-file <path>`
- *   2. Environment: `T3TUI_SERVER`, `T3TUI_TOKEN` (the token itself),
- *      `T3TUI_TOKEN_FILE`
- *   3. The selected profile: `--profile <name>`, else `T3TUI_PROFILE`, else
+ *   2. Environment: `T8_SERVER`, `T8_TOKEN` (the token itself),
+ *      `T8_TOKEN_FILE`
+ *   3. The selected profile: `--profile <name>`, else `T8_PROFILE`, else
  *      the file's `default`, else the only profile there is.
  *   4. Defaults: `http://localhost:3773` and `<config dir>/token`.
  *
@@ -113,7 +113,7 @@ function nonEmpty(value: string | undefined): string | undefined {
   return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
 }
 
-/** `$XDG_CONFIG_HOME/t3tui`, falling back to `~/.config/t3tui`. */
+/** `$XDG_CONFIG_HOME/t8`, falling back to `~/.config/t8`. */
 export function configDirFor(
   env: Readonly<Record<string, string | undefined>>,
   homeDir: string,
@@ -121,7 +121,7 @@ export function configDirFor(
   const xdg = nonEmpty(env.XDG_CONFIG_HOME);
   // The XDG spec says relative values are invalid and must be ignored.
   const base = xdg !== undefined && isAbsolute(xdg) ? xdg : join(homeDir, ".config");
-  return join(base, "t3tui");
+  return join(base, "t8");
 }
 
 function expandHome(path: string, homeDir: string): string {
@@ -171,7 +171,7 @@ export function deriveWsUrl(serverUrl: string): string {
 }
 
 /**
- * Picks the profile: `--profile`, else `T3TUI_PROFILE`, else the file's
+ * Picks the profile: `--profile`, else `T8_PROFILE`, else the file's
  * default, else the only profile. Undefined when there is nothing to pick.
  * An explicitly named profile that does not exist is an error.
  */
@@ -183,7 +183,7 @@ export function selectProfile(
   const servers = file?.servers ?? {};
   const names = Object.keys(servers);
   const known = names.length === 0 ? "none saved" : `saved: ${names.join(", ")}`;
-  const explicit = nonEmpty(flags.profile) ?? nonEmpty(env.T3TUI_PROFILE);
+  const explicit = nonEmpty(flags.profile) ?? nonEmpty(env.T8_PROFILE);
   if (explicit !== undefined) {
     const profile = servers[explicit];
     if (profile === undefined) throw new ConfigError(`unknown profile "${explicit}" (${known})`);
@@ -222,15 +222,15 @@ export function resolveConfig(input: ResolveInput): ResolvedConfig {
 
   const server =
     nonEmpty(flags.server) ??
-    nonEmpty(env.T3TUI_SERVER) ??
+    nonEmpty(env.T8_SERVER) ??
     nonEmpty(profile?.server) ??
     DEFAULT_SERVER_URL;
   const serverUrl = normalizeServerUrl(server);
 
   let token: TokenSource;
   const flagTokenFile = nonEmpty(flags.tokenFile);
-  const envToken = nonEmpty(env.T3TUI_TOKEN);
-  const envTokenFile = nonEmpty(env.T3TUI_TOKEN_FILE);
+  const envToken = nonEmpty(env.T8_TOKEN);
+  const envTokenFile = nonEmpty(env.T8_TOKEN_FILE);
   if (flagTokenFile !== undefined) {
     token = { kind: "file", path: resolve(expandHome(flagTokenFile, homeDir)) };
   } else if (envToken !== undefined) {

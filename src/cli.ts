@@ -49,7 +49,7 @@ import { fetchEnvironment, summarizeEnvironment } from "./connection/environment
 import * as StateSyncModule from "./state/sync.ts";
 import type { DisplayItem, PendingRequest } from "./state/types.ts";
 
-const USAGE = `t3tui-cli: headless client for a T3 Code server
+const USAGE = `t8-cli: headless client for a T3 Code server
 
 Usage: bun run cli <command> [args] [options]
 
@@ -77,14 +77,14 @@ Commands:
 ${PROFILE_USAGE}
 
 Options:
-  -p, --profile <name>         Saved server to use (env T3TUI_PROFILE)
-  --server <url>               Server URL (env T3TUI_SERVER, default http://localhost:3773)
-  --token-file <path>          Bearer token file (env T3TUI_TOKEN / T3TUI_TOKEN_FILE)
+  -p, --profile <name>         Saved server to use (env T8_PROFILE)
+  --server <url>               Server URL (env T8_SERVER, default http://localhost:3773)
+  --token-file <path>          Bearer token file (env T8_TOKEN / T8_TOKEN_FILE)
   --json                       Print one JSON object per line (summaries)
   --raw                        Print one JSON object per line (full decoded stream items)
   -h, --help                   Show this help
 
-Config file: $XDG_CONFIG_HOME/t3tui/config.json (profiles; written by connect)
+Config file: $XDG_CONFIG_HOME/t8/config.json (profiles; written by connect)
 `;
 
 const CONNECT_TIMEOUT = "20 seconds";
@@ -641,7 +641,7 @@ function parse(argv: ReadonlyArray<string>) {
   });
   if (values.token !== undefined) {
     throw new UsageError(
-      "--token is not supported: argv is visible to other processes. Use --token-file or T3TUI_TOKEN.",
+      "--token is not supported: argv is visible to other processes. Use --token-file or T8_TOKEN.",
     );
   }
   return { values, positionals };
@@ -655,13 +655,13 @@ function requireArg(value: string | undefined, name: string): string {
 async function main(): Promise<number> {
   const [first] = process.argv.slice(2);
   if (first !== undefined && PROFILE_COMMANDS.has(first)) {
-    return runProfileCommand(process.argv.slice(2), "t3tui-cli");
+    return runProfileCommand(process.argv.slice(2), "t8-cli");
   }
   let parsed: ReturnType<typeof parse>;
   try {
     parsed = parse(process.argv.slice(2));
   } catch (cause) {
-    info(`t3tui-cli: ${(cause as Error).message}\n\n${USAGE}`);
+    info(`t8-cli: ${(cause as Error).message}\n\n${USAGE}`);
     return 2;
   }
   const { values, positionals } = parsed;
@@ -680,12 +680,12 @@ async function main(): Promise<number> {
       profile: values.profile,
     });
   } catch (cause) {
-    info(`t3tui-cli: ${(cause as Error).message}`);
+    info(`t8-cli: ${(cause as Error).message}`);
     return cause instanceof ConfigError ? 2 : 1;
   }
   if (config.profile !== null && isExpired(config.profile.expiresAt) && command !== "env") {
     info(
-      `t3tui-cli: the token saved for profile "${config.profile.name}" expired; run connect with a new pairing link`,
+      `t8-cli: the token saved for profile "${config.profile.name}" expired; run connect with a new pairing link`,
     );
   }
 
@@ -792,7 +792,7 @@ async function main(): Promise<number> {
         throw new UsageError(`unknown command: ${command}`);
     }
   } catch (cause) {
-    info(`t3tui-cli: ${(cause as Error).message}\n\n${USAGE}`);
+    info(`t8-cli: ${(cause as Error).message}\n\n${USAGE}`);
     return 2;
   }
 
@@ -812,7 +812,7 @@ async function main(): Promise<number> {
   if (Exit.isSuccess(exit)) return 0;
   if (interrupted && Cause.hasInterruptsOnly(exit.cause)) return 130;
   const error = Cause.squash(exit.cause);
-  info(`t3tui-cli: ${errorText(error)}`);
+  info(`t8-cli: ${errorText(error)}`);
   return 1;
 }
 

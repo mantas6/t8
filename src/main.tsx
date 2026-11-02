@@ -1,12 +1,12 @@
 /**
- * t3tui entry point: parses flags, connects (`Connection` + `StateSync` in an
+ * t8 entry point: parses flags, connects (`Connection` + `StateSync` in an
  * Effect runtime), mounts the Solid app and owns shutdown. The terminal is
  * restored on every exit path: `:q` / double Ctrl-C, signals (the renderer
  * handles SIGTERM, SIGHUP, ... by destroying itself, which lands here), and
  * uncaught errors.
  *
- * Usage: t3tui [--profile <name>] [--server <url>] [--token-file <path>] [--thread <id>]
- *        t3tui connect <pairing-link> | servers | forget <name>
+ * Usage: t8 [--profile <name>] [--server <url>] [--token-file <path>] [--thread <id>]
+ *        t8 connect <pairing-link> | servers | forget <name>
  */
 import { parseArgs } from "node:util";
 import { createCliRenderer } from "@opentui/core";
@@ -23,23 +23,23 @@ import { App } from "./tui/App.tsx";
 import { describeError, makeBackend } from "./tui/backend.ts";
 import { registerParsers } from "./tui/parsers.ts";
 
-const USAGE = `t3tui: terminal client for a T3 Code server
+const USAGE = `t8: terminal client for a T3 Code server
 
-Usage: t3tui [options]            (from a checkout: bun run dev [options])
-       t3tui <command> [args]
+Usage: t8 [options]            (from a checkout: bun run dev [options])
+       t8 <command> [args]
 
 Commands:
 ${PROFILE_USAGE}
 
 Options:
-  -p, --profile <name>  Saved server to use (env T3TUI_PROFILE; default: the default profile)
+  -p, --profile <name>  Saved server to use (env T8_PROFILE; default: the default profile)
   --server <url>        Server URL (overrides the profile; default http://localhost:3773)
   --token-file <path>   File holding the bearer token (overrides the profile)
   --thread <id>         Open this thread on start
   -h, --help            Show this help
 
 Get a pairing link in the T3 Code app (Settings → Connections) or with
-\`t3 pair\` on the server's host, then: t3tui connect '<link>'
+\`t3 pair\` on the server's host, then: t8 connect '<link>'
 
 Press ? inside the app for the keys.
 `;
@@ -61,7 +61,7 @@ function parse(argv: ReadonlyArray<string>) {
   });
   if (values.token !== undefined) {
     throw new Error(
-      "--token is not supported: argv is visible to other processes. Use --token-file or T3TUI_TOKEN.",
+      "--token is not supported: argv is visible to other processes. Use --token-file or T8_TOKEN.",
     );
   }
   return values;
@@ -70,13 +70,13 @@ function parse(argv: ReadonlyArray<string>) {
 async function main(): Promise<void> {
   const [first] = process.argv.slice(2);
   if (first !== undefined && PROFILE_COMMANDS.has(first)) {
-    process.exit(await runProfileCommand(process.argv.slice(2), "t3tui"));
+    process.exit(await runProfileCommand(process.argv.slice(2), "t8"));
   }
   let values: ReturnType<typeof parse>;
   try {
     values = parse(process.argv.slice(2));
   } catch (cause) {
-    process.stderr.write(`t3tui: ${(cause as Error).message}\n\n${USAGE}`);
+    process.stderr.write(`t8: ${(cause as Error).message}\n\n${USAGE}`);
     process.exit(2);
   }
   if (values.help) {
@@ -92,7 +92,7 @@ async function main(): Promise<void> {
       profile: values.profile,
     });
   } catch (cause) {
-    process.stderr.write(`t3tui: ${(cause as Error).message}\n`);
+    process.stderr.write(`t8: ${(cause as Error).message}\n`);
     process.exit(cause instanceof ConfigError ? 2 : 1);
   }
 
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
     }
     if (error !== undefined) {
       const detail = error instanceof Error && error.stack ? error.stack : describeError(error);
-      process.stderr.write(`t3tui: ${detail}\n`);
+      process.stderr.write(`t8: ${detail}\n`);
     }
     await Promise.race([
       runtime.dispose().catch(() => {}),

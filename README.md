@@ -1,6 +1,6 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# t3tui
+# t8
 
 A terminal UI client for the [T3 Code](https://t3.codes) server
 ([upstream](https://github.com/pingdotgg/t3code)). It talks to the server over
@@ -24,38 +24,38 @@ Code server **v0.1.2** (orchestration protocol 2).
 
 ### Connecting
 
-t3tui signs in to a T3 Code server with a pairing link, like the other T3
+t8 signs in to a T3 Code server with a pairing link, like the other T3
 clients:
 
 1. Get a pairing link from the server: in the T3 Code app, **Settings →
    Connections**, create a pairing link (shown as a link and a QR code); or
    run `t3 pair` on the server's host, which prints a QR code and a
    `Pairing URL:` line. A link works once and expires after a few minutes.
-2. Hand it to t3tui (quote it: the token is after a `#`):
+2. Hand it to t8 (quote it: the token is after a `#`):
 
    ```sh
-   t3tui connect 'https://host:3773/pair#token=...'
-   t3tui connect --host http://host:3773 --code <pairing-code>   # the same, in two parts
-   t3tui connect                                                 # paste the link at the prompt
+   t8 connect 'https://host:3773/pair#token=...'
+   t8 connect --host http://host:3773 --code <pairing-code>   # the same, in two parts
+   t8 connect                                                 # paste the link at the prompt
    ```
 
    This checks that the server is reachable and speaks this client's
-   protocol (so a link is not spent on a server t3tui cannot use), redeems
+   protocol (so a link is not spent on a server t8 cannot use), redeems
    the link for a bearer token (scopes `orchestration:read` and
    `orchestration:operate`), and saves it as a **profile**: the token goes
-   to `~/.config/t3tui/<profile>.token` (mode 600) and the profile to
+   to `~/.config/t8/<profile>.token` (mode 600) and the profile to
    `config.json`. Links on `app.t3.codes` (`.../pair?host=<server>#token=...`)
    work too.
-3. Run `t3tui`. That is all.
+3. Run `t8`. That is all.
 
 Each server is a profile, named after the server's label unless you pass
 `--name <profile>`; pairing the same server again updates its profile. The
 first profile becomes the default; `--default` makes a later one the default.
 
 ```sh
-t3tui servers                   # list profiles (* marks the default) and when their tokens expire
-t3tui -p work                   # use another profile (or T3TUI_PROFILE=work)
-t3tui forget work               # remove a profile and its token file
+t8 servers                   # list profiles (* marks the default) and when their tokens expire
+t8 -p work                   # use another profile (or T8_PROFILE=work)
+t8 forget work               # remove a profile and its token file
 ```
 
 Inside the TUI, `:connect <link>` pairs and switches to the new server, and
@@ -64,12 +64,12 @@ one is in use.
 
 The token the server issues is valid for 30 days (T3 Code v0.1.2 has no way
 to renew a bearer token). When it has expired or been revoked, the
-connection fails with a message saying so: run `t3tui connect` with a new
-link. `t3tui forget` does not end the session on the server; revoke it in
+connection fails with a message saying so: run `t8 connect` with a new
+link. `t8 forget` does not end the session on the server; revoke it in
 Settings → Connections or with `t3 auth session revoke`.
 
 Without pairing you can still mint a token on the server's host with
-`t3 auth session issue` and put it in `~/.config/t3tui/token` (see
+`t3 auth session issue` and put it in `~/.config/t8/token` (see
 [Configuration](#configuration)).
 
 ### From a checkout
@@ -178,7 +178,7 @@ this session. An unknown command says so in the status line.
 #### Pickers
 
 Pickers open as a box over the transcript, which keeps streaming underneath.
-Typing filters (fuzzy: `t3t` finds "t3tui"); the best match gets the cursor.
+Typing filters (fuzzy: `t3t` finds "t8"); the best match gets the cursor.
 
 | Picker keys                     |                                                          |
 | ------------------------------- | -------------------------------------------------------- |
@@ -216,7 +216,7 @@ elsewhere use `Ctrl-j` or `Alt-Enter`. Inside tmux, OSC 52 needs
 
 Fenced code blocks in messages and plans are syntax highlighted with
 tree-sitter. Besides the grammars OpenTUI bundles (JavaScript, TypeScript,
-JSX/TSX, Markdown, Zig), t3tui registers these (`src/tui/parsers.ts`):
+JSX/TSX, Markdown, Zig), t8 registers these (`src/tui/parsers.ts`):
 
 | Language | Fence info strings                                 |
 | -------- | -------------------------------------------------- |
@@ -241,10 +241,10 @@ have no npm build); nothing is downloaded at runtime.
 
 The client authenticates with a bearer token issued by the server (it needs the
 `orchestration:read` scope, plus `orchestration:operate` to send commands).
-`t3tui connect` (above) gets one and saves it; the files are only readable by
+`t8 connect` (above) gets one and saves it; the files are only readable by
 you.
 
-`$XDG_CONFIG_HOME/t3tui/config.json` (default `~/.config/t3tui/config.json`)
+`$XDG_CONFIG_HOME/t8/config.json` (default `~/.config/t8/config.json`)
 holds the profiles. `connect` writes it; you can edit it too:
 
 ```json
@@ -271,10 +271,10 @@ works: it is read as a profile named `default` and converted the first time
 Settings are resolved in this order (first wins):
 
 1. Flags: `--server <url>`, `--token-file <path>`
-2. Environment: `T3TUI_SERVER`, `T3TUI_TOKEN` (the token itself), `T3TUI_TOKEN_FILE`
-3. The profile: `--profile <name>` / `-p`, else `T3TUI_PROFILE`, else the
+2. Environment: `T8_SERVER`, `T8_TOKEN` (the token itself), `T8_TOKEN_FILE`
+3. The profile: `--profile <name>` / `-p`, else `T8_PROFILE`, else the
    `default` in `config.json`, else the only profile
-4. Defaults: `http://localhost:3773` and `~/.config/t3tui/token`
+4. Defaults: `http://localhost:3773` and `~/.config/t8/token`
 
 The token is never accepted as a command-line argument (a pairing link is:
 it works once and expires within minutes). The token is read again on every
@@ -320,16 +320,16 @@ patching.
 
 ## Install with Nix
 
-The flake builds a `t3tui` command that runs the sources with Bun from
+The flake builds a `t8` command that runs the sources with Bun from
 nixpkgs (currently for `x86_64-linux`). Replace `<owner>` with the GitHub
 owner of this repository.
 
 ```sh
 # Run without installing
-nix run github:<owner>/t3tui -- --server http://localhost:3773 --thread <threadId>
+nix run github:<owner>/t8 -- --server http://localhost:3773 --thread <threadId>
 
 # Install into your profile
-nix profile install github:<owner>/t3tui
+nix profile install github:<owner>/t8
 ```
 
 As a flake input of a NixOS or home-manager configuration:
@@ -338,20 +338,20 @@ As a flake input of a NixOS or home-manager configuration:
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    t3tui = {
-      url = "github:<owner>/t3tui";
+    t8 = {
+      url = "github:<owner>/t8";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { nixpkgs, t3tui, ... }: {
+  outputs = { nixpkgs, t8, ... }: {
     nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
       system = "x86_64-linux";
       modules = [
         ({ pkgs, ... }: {
           # NixOS; for home-manager use home.packages instead
           environment.systemPackages = [
-            t3tui.packages.${pkgs.stdenv.hostPlatform.system}.default
+            t8.packages.${pkgs.stdenv.hostPlatform.system}.default
           ];
         })
       ];
@@ -360,7 +360,7 @@ As a flake input of a NixOS or home-manager configuration:
 }
 ```
 
-From a checkout: `nix build` (the result is `./result/bin/t3tui`), `nix run . -- --help`,
+From a checkout: `nix build` (the result is `./result/bin/t8`), `nix run . -- --help`,
 and `nix flake check` (builds the package and checks the Nix formatting).
 
 ### Updating the dependency hash
@@ -371,7 +371,7 @@ it is stale (after changing `bun.lock`, or when a `nix flake update` brings a
 new Bun), the build fails with a hash mismatch; put the new hash in the file:
 
 ```sh
-nix build .#t3tui.node_modules 2>&1 | grep 'got:'
+nix build .#t8.node_modules 2>&1 | grep 'got:'
 #          got:    sha256-...
 echo 'sha256-...' > nix/deps-hash.txt
 nix build

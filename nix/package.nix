@@ -1,4 +1,4 @@
-# t3tui: runs the TypeScript/JSX sources directly with Bun (no bundling).
+# t8: runs the TypeScript/JSX sources directly with Bun (no bundling).
 #
 # Dependencies come from a fixed-output derivation (`node_modules`) that runs
 # `bun install --frozen-lockfile` for the runtime dependencies. It installs the
