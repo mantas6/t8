@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "probe": "bun run src/probe.ts"
+    "probe": "bun run src/probe.ts",
+    "cli": "bun run src/cli.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@opentui/core": "0.8.1",

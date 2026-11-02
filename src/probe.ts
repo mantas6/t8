@@ -5,64 +5,40 @@
  *
  * Fetches the public environment descriptor, validates it against the
  * vendored contracts schema and checks that the server speaks the same
- * orchestration protocol version as the vendored contracts.
+ * orchestration protocol version as the vendored contracts. The same check
+ * runs before every connection attempt (see src/connection/environment.ts).
  */
-import { ExecutionEnvironmentDescriptor, ORCHESTRATION_PROTOCOL_VERSION } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
-
-const DEFAULT_SERVER_URL = "http://localhost:3773";
-const DESCRIPTOR_PATH = "/.well-known/t3/environment";
+import * as Effect from "effect/Effect";
+import { DEFAULT_SERVER_URL, normalizeServerUrl } from "./config.ts";
+import { checkProtocol, fetchEnvironment, summarizeEnvironment } from "./connection/environment.ts";
 
 function fail(message: string): never {
   console.error(`probe: ${message}`);
   process.exit(1);
 }
 
-function errorMessage(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause);
-}
-
-const serverUrl = process.argv[2] ?? DEFAULT_SERVER_URL;
-
-const descriptorUrl =
-  URL.parse(DESCRIPTOR_PATH, serverUrl) ?? fail(`invalid server URL: ${serverUrl}`);
-
-const response = await fetch(descriptorUrl, { headers: { accept: "application/json" } }).catch(
-  (cause: unknown) => fail(`could not reach ${descriptorUrl.href}: ${errorMessage(cause)}`),
-);
-
-if (!response.ok) {
-  fail(`${descriptorUrl.href} responded with HTTP ${response.status} ${response.statusText}`);
-}
-
-const body: unknown = await response
-  .json()
-  .catch(() => fail(`${descriptorUrl.href} did not return valid JSON`));
-
-let descriptor: ExecutionEnvironmentDescriptor;
+let serverUrl: string;
 try {
-  descriptor = Schema.decodeUnknownSync(ExecutionEnvironmentDescriptor)(body);
+  serverUrl = normalizeServerUrl(process.argv[2] ?? DEFAULT_SERVER_URL);
 } catch (cause) {
-  fail(`environment descriptor does not match the vendored schema:\n${errorMessage(cause)}`);
+  fail((cause as Error).message);
 }
 
-const serverProtocol = descriptor.orchestrationProtocolVersion;
+const result = await Effect.runPromise(Effect.result(fetchEnvironment(serverUrl)));
+if (result._tag === "Failure") fail(result.failure.message);
+const descriptor = result.success;
+const summary = summarizeEnvironment(serverUrl, descriptor);
 const machine = descriptor.platform.machine ? ` (${descriptor.platform.machine})` : "";
 
-console.log(`server:        ${descriptorUrl.origin}`);
-console.log(`serverVersion: ${descriptor.serverVersion}`);
+console.log(`server:        ${summary.server}`);
+console.log(`serverVersion: ${summary.serverVersion}`);
 console.log(
-  `protocol:      ${serverProtocol ?? "(not reported)"} (vendored contracts: ${ORCHESTRATION_PROTOCOL_VERSION})`,
+  `protocol:      ${summary.serverProtocol ?? "(not reported)"} (vendored contracts: ${summary.clientProtocol})`,
 );
-console.log(`environment:   ${descriptor.label} (${descriptor.environmentId})`);
-console.log(`platform:      ${descriptor.platform.os}/${descriptor.platform.arch}${machine}`);
+console.log(`environment:   ${summary.environment.label} (${summary.environment.id})`);
+console.log(`platform:      ${summary.platform}${machine}`);
 
-if (serverProtocol !== ORCHESTRATION_PROTOCOL_VERSION) {
-  fail(
-    `orchestration protocol mismatch: server reports ${serverProtocol ?? "none"}, ` +
-      `vendored contracts expect ${ORCHESTRATION_PROTOCOL_VERSION}. ` +
-      "Refresh vendor/contracts to match the server (see vendor/contracts/VENDORED.md).",
-  );
-}
+const mismatch = checkProtocol(descriptor);
+if (mismatch !== undefined) fail(mismatch.message);
 
 console.log("ok: protocol versions match");

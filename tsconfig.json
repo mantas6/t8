@@ -29,5 +29,5 @@
       "@t3tools/contracts/relay": ["./vendor/contracts/src/relay.ts"]
     }
   },
-  "include": ["src", "vendor/contracts/src"]
+  "include": ["src", "test", "vendor/contracts/src"]
 }
