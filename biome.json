@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!vendor", "!assets", "!bun.lock", "!flake.lock"]
+    "includes": ["**", "!vendor", "!assets", "!bun.lock", "!flake.lock", "!.claude"]
   },
   "formatter": {
     "enabled": true,

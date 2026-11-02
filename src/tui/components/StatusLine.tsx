@@ -21,12 +21,14 @@ const MODE_LABEL: Readonly<Record<Mode, string>> = {
   normal: " NORMAL ",
   insert: " INSERT ",
   command: " COMMAND ",
+  picker: " PICKER ",
 };
 
 const MODE_COLOR: Readonly<Record<Mode, string>> = {
   normal: colors.modeNormal,
   insert: colors.modeInsert,
   command: colors.modeCommand,
+  picker: colors.accent,
 };
 
 function truncate(text: string, width: number): string {

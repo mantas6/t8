@@ -4,28 +4,116 @@
  * `Connection` and `StateSync`; tests pass a fake.
  */
 
-import { type RuntimeRequestId, type ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  isProviderAvailable,
+  type ModelSelection,
+  type ProjectId,
+  type ProviderInstanceId,
+  type RunId,
+  type RuntimeMode,
+  type RuntimeRequestId,
+  type ServerConfig,
+  type ThreadId,
+  TurnItemId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type * as ManagedRuntime from "effect/ManagedRuntime";
 import {
+  archiveThread,
+  cancelQueuedRun,
+  createThread,
   type DeliveryIntent,
   fetchTurnItem,
+  getArchivedThreads,
+  getServerConfig,
   interruptRun,
   type RuntimeRequestResponse,
+  reorderQueuedRun,
   respondToRequest,
   sendMessage,
+  setModelSelection,
+  setRuntimeMode,
 } from "../commands.ts";
 import { Connection } from "../connection/connection.ts";
+import { toThreadSummary } from "../state/reducers/shell.ts";
 import { toDisplayItem } from "../state/selectors.ts";
 import type { ShellStore, ThreadStore } from "../state/store.ts";
 import { StateSync } from "../state/sync.ts";
+import type { ThreadSummary } from "../state/types.ts";
+
+export interface CatalogModel {
+  readonly slug: string;
+  readonly name: string;
+  readonly isDefault: boolean;
+}
+
+/** A provider instance that can run turns, with its models. */
+export interface CatalogProvider {
+  readonly instanceId: ProviderInstanceId;
+  readonly name: string;
+  readonly models: ReadonlyArray<CatalogModel>;
+  /** Null when the provider does not say (all modes). */
+  readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | null;
+}
+
+/** What the model picker and new threads need from the server config. */
+export interface ModelCatalog {
+  readonly providers: ReadonlyArray<CatalogProvider>;
+  /** The server's default for new threads (settings), if set. */
+  readonly defaultModelSelection: ModelSelection | null;
+  readonly defaultRuntimeMode: RuntimeMode;
+}
+
+/** Usable providers from a server config: enabled, installed, available, with models. */
+export function toModelCatalog(config: ServerConfig): ModelCatalog {
+  return {
+    providers: config.providers
+      .filter(
+        (provider) =>
+          provider.enabled &&
+          provider.installed &&
+          isProviderAvailable(provider) &&
+          provider.models.length > 0,
+      )
+      .map((provider) => ({
+        instanceId: provider.instanceId,
+        name: provider.displayName ?? provider.instanceId,
+        models: provider.models.map((model) => ({
+          slug: model.slug,
+          name: model.name,
+          isDefault: model.isDefault === true,
+        })),
+        supportedRuntimeModes: provider.supportedRuntimeModes ?? null,
+      })),
+    defaultModelSelection: config.settings.defaultModelSelection,
+    defaultRuntimeMode: config.settings.defaultRuntimeMode,
+  };
+}
+
+export interface NewThread {
+  readonly projectId: ProjectId;
+  /** Empty for the server's placeholder title. */
+  readonly title: string;
+  readonly modelSelection: ModelSelection;
+  readonly runtimeMode: RuntimeMode;
+}
+
+export interface SendOptions {
+  /** Lets the server title a fresh, untitled thread from its first message. */
+  readonly titleSeed?: string;
+}
 
 export interface Backend {
   readonly shell: ShellStore;
   readonly thread: ThreadStore;
   /** Shows a thread in the thread store, replacing the open one. */
   openThread(threadId: ThreadId): void;
-  send(threadId: ThreadId, text: string, intent: DeliveryIntent): Promise<void>;
+  send(
+    threadId: ThreadId,
+    text: string,
+    intent: DeliveryIntent,
+    options?: SendOptions,
+  ): Promise<void>;
   interrupt(threadId: ThreadId): Promise<void>;
   respond(
     threadId: ThreadId,
@@ -34,8 +122,20 @@ export interface Backend {
   ): Promise<void>;
   /** The full output of a tool call whose result the stream omitted; null when it has none. */
   fetchToolResult(threadId: ThreadId, itemId: string): Promise<string | null>;
+  /** Providers and models (`server.getConfig`), cached after the first call unless `refresh`. */
+  modelCatalog(refresh?: boolean): Promise<ModelCatalog>;
+  createThread(input: NewThread): Promise<ThreadId>;
+  setModel(threadId: ThreadId, modelSelection: ModelSelection): Promise<void>;
+  setRuntimeMode(threadId: ThreadId, runtimeMode: RuntimeMode): Promise<void>;
+  archive(threadId: ThreadId): Promise<void>;
+  /** Archived threads, fetched on demand (`getArchivedShellSnapshot`). */
+  archivedThreads(): Promise<ReadonlyArray<ThreadSummary>>;
+  cancelQueued(threadId: ThreadId, runId: RunId): Promise<void>;
+  reorderQueued(threadId: ThreadId, runId: RunId, beforeRunId: RunId | null): Promise<void>;
   /** Skips the reconnect backoff. */
   reconnectNow(): void;
+  /** Drops the connection (if up) and reconnects right away. */
+  reconnect(): void;
 }
 
 /** A readable one-liner for a failed command. */
@@ -68,14 +168,22 @@ export async function makeBackend(
   );
   const run = <A, E>(effect: Effect.Effect<A, E, Connection>): Promise<A> =>
     runtime.runPromise(effect);
+  let catalog: Promise<ModelCatalog> | undefined;
   return {
     shell: sync.shell,
     thread: sync.thread,
     openThread: (threadId) => {
       runtime.runFork(sync.openThread(threadId));
     },
-    send: async (threadId, text, intent) => {
-      await run(sendMessage(threadId, text, intent));
+    send: async (threadId, text, intent, options = {}) => {
+      await run(
+        sendMessage(
+          threadId,
+          text,
+          intent,
+          options.titleSeed === undefined ? {} : { titleSeed: options.titleSeed },
+        ),
+      );
     },
     interrupt: async (threadId) => {
       await run(interruptRun(threadId));
@@ -89,8 +197,51 @@ export async function makeBackend(
       const display = toDisplayItem(item, "local", NO_CONTEXT);
       return display.kind === "tool_call" ? display.result : null;
     },
+    modelCatalog: (refresh = false) => {
+      if (catalog === undefined || refresh) {
+        const pending = run(getServerConfig()).then(toModelCatalog);
+        catalog = pending;
+        // A failure is not cached: the next call tries again.
+        pending.catch(() => {
+          if (catalog === pending) catalog = undefined;
+        });
+      }
+      return catalog;
+    },
+    createThread: async (input) => {
+      const result = await run(
+        createThread(input.projectId, {
+          ...(input.title.trim() === "" ? {} : { title: input.title }),
+          modelSelection: input.modelSelection,
+          runtimeMode: input.runtimeMode,
+        }),
+      );
+      return result.threadId;
+    },
+    setModel: async (threadId, modelSelection) => {
+      await run(setModelSelection(threadId, modelSelection));
+    },
+    setRuntimeMode: async (threadId, runtimeMode) => {
+      await run(setRuntimeMode(threadId, runtimeMode));
+    },
+    archive: async (threadId) => {
+      await run(archiveThread(threadId));
+    },
+    archivedThreads: async () => {
+      const threads = await run(getArchivedThreads());
+      return threads.map((thread) => toThreadSummary(thread, "archive"));
+    },
+    cancelQueued: async (threadId, runId) => {
+      await run(cancelQueuedRun(threadId, runId));
+    },
+    reorderQueued: async (threadId, runId, beforeRunId) => {
+      await run(reorderQueuedRun(threadId, runId, beforeRunId));
+    },
     reconnectNow: () => {
       runtime.runFork(connection.reconnectNow);
+    },
+    reconnect: () => {
+      runtime.runFork(connection.forceReconnect);
     },
   };
 }

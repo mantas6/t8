@@ -7,10 +7,42 @@
 import { createSignal } from "solid-js";
 import { createStore } from "solid-js/store";
 
-export type Mode = "normal" | "insert" | "command";
+export type Mode = "normal" | "insert" | "command" | "picker";
 
-/** What has the keyboard: the transcript (with the input), a prompt line, or the help overlay. */
-export type View = "transcript" | "command" | "search" | "help";
+/**
+ * What has the keyboard: the transcript (with the message input), a line at
+ * the bottom (`:` command, `/` search, or a text `input` such as a new
+ * thread's title), the help overlay, or one of the picker overlays.
+ */
+export type View =
+  | "transcript"
+  | "command"
+  | "search"
+  | "input"
+  | "help"
+  | "threads"
+  | "projects"
+  | "models"
+  | "modes"
+  | "queue";
+
+export type PickerView = Extract<View, "threads" | "projects" | "models" | "modes" | "queue">;
+
+export const PICKER_VIEWS: ReadonlySet<View> = new Set<View>([
+  "threads",
+  "projects",
+  "models",
+  "modes",
+  "queue",
+]);
+
+export const isPickerView = (view: View): view is PickerView => PICKER_VIEWS.has(view);
+
+/** A y/n question in the bottom line; it takes the keyboard over whatever view is open. */
+export interface Confirm {
+  readonly message: string;
+  readonly onYes: () => void;
+}
 
 export type NoticeLevel = "info" | "warn" | "error";
 
@@ -24,6 +56,7 @@ export const NOTICE_MS = 3_000;
 export function createUiState() {
   const [mode, setMode] = createSignal<Mode>("normal");
   const [view, setView] = createSignal<View>("transcript");
+  const [confirm, setConfirm] = createSignal<Confirm | null>(null);
   const [notice, setNoticeSignal] = createSignal<Notice | null>(null);
   /** Keep the transcript pinned to the tail. Off after scrolling up, on again at the bottom. */
   const [follow, setFollow] = createSignal(true);
@@ -59,6 +92,8 @@ export function createUiState() {
     setMode,
     view,
     setView,
+    confirm,
+    setConfirm,
     notice,
     setNotice,
     clearNotice: () => setNoticeSignal(null),

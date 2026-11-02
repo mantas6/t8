@@ -57,6 +57,7 @@ export function toThreadSummary(
     activeRunId: thread.activeRunId,
     pendingRequest: thread.pendingRuntimeRequest,
     model: `${thread.modelSelection.instanceId}/${thread.modelSelection.model}`,
+    modelSelection: thread.modelSelection,
     branch: thread.branch,
     lastError: thread.lastError ?? null,
     latestMessage:
@@ -162,8 +163,15 @@ export function applyShellEvent(state: ShellState, item: ShellEventItem): ShellS
           [item.thread.id]: toThreadSummary(item.thread, item.location),
         },
       };
-    case "thread.removed":
+    case "thread.removed": {
+      // Archiving can arrive as "removed from active" next to "updated in
+      // archive"; only drop the entry if it is in the list being removed from.
+      const existing = state.threads[item.threadId];
+      if (existing !== undefined && (existing.archived ? "archive" : "active") !== item.location) {
+        return base;
+      }
       return { ...base, threads: without(state.threads, item.threadId) };
+    }
     default:
       item satisfies never;
       return state;

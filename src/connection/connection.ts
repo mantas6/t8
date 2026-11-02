@@ -51,6 +51,8 @@ import {
 
 export const BACKOFF_INITIAL_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
+/** Pause before reconnecting after `forceReconnect` closed the socket. */
+const REQUESTED_RECONNECT_DELAY_MS = 250;
 
 export type FatalReason = "protocol-mismatch" | "unauthorized" | "forbidden" | "config";
 
@@ -101,6 +103,12 @@ export class Connection extends Context.Service<
     ) => Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | ConnectionFatalError>;
     /** Skips the remaining backoff delay, if the supervisor is waiting. */
     readonly reconnectNow: Effect.Effect<void>;
+    /**
+     * Reconnects now: closes the open socket (streams fail over to the next
+     * session as on any drop, and the retry skips the backoff), or skips the
+     * backoff when already disconnected.
+     */
+    readonly forceReconnect: Effect.Effect<void>;
   }
 >()("t3tui/Connection") {}
 
@@ -116,14 +124,20 @@ type AttemptOutcome =
   | { readonly _tag: "fatal"; readonly error: ConnectionFatalError }
   | { readonly _tag: "lost"; readonly reason: string; readonly wasConnected: boolean };
 
-/** Bun's WebSocket accepts `{ headers, protocols }`; the global constructor layer rejects it. */
-const bunWebSocketConstructor = Layer.succeed(Socket.WebSocketConstructor)(
-  (url, options) =>
-    new WebSocket(
-      url,
-      options as ConstructorParameters<typeof WebSocket>[1],
-    ) as unknown as Socket.WebSocketLike,
-);
+/**
+ * Bun's WebSocket accepts `{ headers, protocols }`; the global constructor
+ * layer rejects it. `onOpen` receives each socket so it can be closed on
+ * request (`forceReconnect`).
+ */
+const bunWebSocketConstructor = (onOpen: (socket: WebSocket) => void) =>
+  Layer.succeed(Socket.WebSocketConstructor)((url, options) => {
+    const socket = new WebSocket(url, options as ConstructorParameters<typeof WebSocket>[1]);
+    onOpen(socket);
+    return socket as unknown as Socket.WebSocketLike;
+  });
+
+/** Close code for a reconnect the user asked for (4000-4999 is for applications). */
+const RECONNECT_CLOSE_CODE = 4000;
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -189,6 +203,8 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
   const status = yield* SubscriptionRef.make<ConnectionStatus>({ _tag: "connecting", attempt: 1 });
   const wake = yield* Ref.make(yield* Deferred.make<void>());
   let generation = 0;
+  let currentSocket: WebSocket | undefined;
+  let reconnectRequested = false;
 
   // Each connected session lives in its own scope. It is closed at the start
   // of the next attempt rather than as soon as the socket drops: closing it
@@ -244,7 +260,13 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     const layerSocket = Socket.layerWebSocket(config.wsUrl, {
       openTimeout: SOCKET_OPEN_TIMEOUT,
       headers: { authorization: `Bearer ${token.success}` },
-    }).pipe(Layer.provide(bunWebSocketConstructor));
+    }).pipe(
+      Layer.provide(
+        bunWebSocketConstructor((socket) => {
+          currentSocket = socket;
+        }),
+      ),
+    );
     const layerProtocol = Layer.effect(
       RpcClient.Protocol,
       RpcClient.makeProtocolSocket({
@@ -288,7 +310,9 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
       _tag: "lost",
       reason: timedOut
         ? `server stopped responding (no frame for ${Duration.toSeconds(PING_TIMEOUT)}s)`
-        : "connection closed",
+        : reconnectRequested
+          ? "reconnect requested"
+          : "connection closed",
       wasConnected: true,
     } as const;
   });
@@ -327,7 +351,12 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
         attempt: attemptNumber,
         retryAt: Date.now() + delayMs,
       });
-      yield* Effect.sleep(Duration.millis(delayMs)).pipe(Effect.raceFirst(Deferred.await(signal)));
+      // A requested reconnect still pauses briefly: the old session's streams
+      // must fail with the transport error before its scope is closed (see
+      // `sessionScope`), or consumers would see an interruption instead.
+      const wait = reconnectRequested ? REQUESTED_RECONNECT_DELAY_MS : delayMs;
+      reconnectRequested = false;
+      yield* Effect.sleep(Duration.millis(wait)).pipe(Effect.raceFirst(Deferred.await(signal)));
       delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
     }
   });
@@ -358,6 +387,11 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
       ),
     ) as Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | ConnectionFatalError>;
 
+  const reconnectNow = Ref.get(wake).pipe(
+    Effect.flatMap((signal) => Deferred.succeed(signal, undefined)),
+    Effect.asVoid,
+  );
+
   return Connection.of({
     config,
     status,
@@ -365,9 +399,16 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     client: Effect.map(session, (current) => current.client),
     sessions,
     subscribe,
-    reconnectNow: Ref.get(wake).pipe(
-      Effect.flatMap((signal) => Deferred.succeed(signal, undefined)),
-      Effect.asVoid,
+    reconnectNow,
+    forceReconnect: SubscriptionRef.get(status).pipe(
+      Effect.flatMap((current) => {
+        const socket = currentSocket;
+        if (current._tag !== "connected" || socket === undefined) return reconnectNow;
+        return Effect.sync(() => {
+          reconnectRequested = true;
+          socket.close(RECONNECT_CLOSE_CODE, "reconnect requested");
+        });
+      }),
     ),
   });
 });

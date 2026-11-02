@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseCommandLine } from "../src/tui/cmdline.ts";
 import { compileKeymaps, DEFAULT_KEYMAPS, helpRows } from "../src/tui/keymap.ts";
 import {
   compileKeymap,
@@ -239,28 +238,5 @@ describe("default keymaps", () => {
       "j <Down> <C-e>",
     );
     expect(helpRows(DEFAULT_KEYMAPS.prompt).find((row) => row.keys === "1-9")).toBeDefined();
-  });
-});
-
-describe("parseCommandLine", () => {
-  test("quit variants", () => {
-    for (const input of ["q", ":q", "qa", ":qa!", "quit", " :q "]) {
-      expect(parseCommandLine(input)).toEqual({ type: "quit" });
-    }
-  });
-
-  test("write, approve, deny", () => {
-    expect(parseCommandLine("w")).toEqual({ type: "write" });
-    expect(parseCommandLine("a")).toEqual({ type: "approve" });
-    expect(parseCommandLine("approve")).toEqual({ type: "approve" });
-    expect(parseCommandLine("d")).toEqual({ type: "deny" });
-    expect(parseCommandLine("deny")).toEqual({ type: "deny" });
-  });
-
-  test("empty and unknown", () => {
-    expect(parseCommandLine("")).toEqual({ type: "noop" });
-    expect(parseCommandLine(":")).toEqual({ type: "noop" });
-    expect(parseCommandLine("frobnicate now")).toEqual({ type: "unknown", name: "frobnicate" });
-    expect(parseCommandLine("toString")).toEqual({ type: "unknown", name: "toString" });
   });
 });

@@ -16,8 +16,8 @@ Early development. There is a connection layer (auth, version gate, pings,
 reconnect), typed command helpers, a client state layer (Solid stores fed by
 pure reducers over the server's event stream), a headless CLI, and the core of
 the TUI: a full-screen transcript of one thread with vim-style keys, a
-message input and approval prompts. There is no thread picker yet: open a
-thread with `--thread <id>` (find ids with `bun run cli shell`). Targets T3
+message input, approval prompts, a `:` command line and fuzzy pickers for
+threads, projects, models, runtime modes and the message queue. Targets T3
 Code server **v0.1.2** (orchestration protocol 2).
 
 ## Running
@@ -33,6 +33,7 @@ bun run probe                         # defaults to http://localhost:3773
 bun run probe http://host:3773
 
 # Start the TUI
+bun run dev                           # then :t to pick a thread
 bun run dev --thread <threadId>       # also --server <url>, --token-file <path>
 ```
 
@@ -61,7 +62,7 @@ sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
 | `x`                         | interrupt the run                                 |
 | `gt` `gT`                   | next / previous thread in the project             |
 | `/` then `n` `N`            | search the transcript, next / previous match      |
-| `:`                         | command line: `:q`, `:a` (approve), `:d` (deny)   |
+| `:`                         | command line (see below)                          |
 | `?`                         | help                                              |
 | `Ctrl-c`                    | interrupt the run; twice within a second quits    |
 
@@ -70,6 +71,7 @@ sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
 | `Enter`                              | send                                         |
 | `Shift-Enter`, `Ctrl-j`, `Alt-Enter` | newline                                      |
 | `Ctrl-s`                             | send as steer (into the running turn)        |
+| `Ctrl-q`                             | send queued (runs after the active run)      |
 | `Esc` / `Ctrl-c`                     | back to NORMAL / clear the draft and go back |
 | `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b`  | scroll the transcript                        |
 
@@ -78,6 +80,56 @@ sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
 | `y` / `n`       | approve / deny                                       |
 | `1`-`9`         | pick an option or answer                             |
 | `Esc` / `Enter` | leave the request (it stays visible) / go back to it |
+
+#### Commands
+
+`Tab` completes command names, and thread titles or project names where a
+command takes one (press it again to cycle). `Up` / `Down` walk the history of
+this session. An unknown command says so in the status line.
+
+| Command                 | What it does                                                   |
+| ----------------------- | -------------------------------------------------------------- |
+| `:t` `:threads [text]`  | thread picker, optionally pre-filtered                         |
+| `:p` `:projects [name]` | project switcher; with a name, that project's threads          |
+| `:n` `:new [title]`     | new thread: pick the project, then the title (empty: untitled) |
+| `:m` `:model`           | model picker for the open thread                               |
+| `:mode`                 | runtime mode picker for the open thread                        |
+| `:b` `:thread <n>`      | open thread number `n` from `:t` (a title works too)           |
+| `:bn` `:bp`             | next / previous thread in the project (like `gt` / `gT`)       |
+| `:queue`                | queued messages of the open thread                             |
+| `:archive`              | archive the open thread (asks first)                           |
+| `:a` `:approve`         | approve the pending request                                    |
+| `:d` `:deny`            | deny the pending request                                       |
+| `:reconnect`            | drop the connection and reconnect now                          |
+| `:h` `:help`            | keys and commands                                              |
+| `:q`                    | quit; refused while a run is active in the open thread         |
+| `:qa` `:q!`             | quit anyway                                                    |
+| `:w`                    | nothing to save                                                |
+
+#### Pickers
+
+Pickers open as a box over the transcript, which keeps streaming underneath.
+Typing filters (fuzzy: `t3t` finds "t3tui"); the best match gets the cursor.
+
+| Picker keys                     |                                                          |
+| ------------------------------- | -------------------------------------------------------- |
+| `Up` `Down` / `Ctrl-n` `Ctrl-p` | move (also `j` `k` while the filter is empty)            |
+| `Enter`                         | open / choose                                            |
+| `Esc`                           | clear the filter, then close (`Ctrl-c` closes at once)   |
+| `dd`                            | thread picker: archive; queue: cancel (both ask `y`/`n`) |
+| `J` `K`                         | queue: move the message down / up                        |
+| `Ctrl-a`                        | thread picker: show / hide archived threads              |
+
+The thread picker groups threads by project, newest activity first. Each row
+has its number (what `:b <n>` takes), a status glyph (`●` running, `?` waiting
+for an approval or answer, `·` idle, `✕` failed, `×` archived), the title, the
+project and how long ago it was active. `:n` creates the thread with the
+project's default model, else the model picked last in this session, else the
+model of the project's newest thread, else the server's default (asking with
+the model picker if there is none), and the server's default runtime mode;
+the new thread opens in INSERT. The model picker lists the server's enabled
+provider instances and their models (`server.getConfig`, cached); the current
+model is marked `●`.
 
 The transcript follows new output while you are at the bottom; scrolling up
 stops that, and reaching the bottom again (or `G`, or sending) resumes it.

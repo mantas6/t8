@@ -1,8 +1,10 @@
 /**
  * The full-screen TUI: status line, transcript, and the input (or the
- * pending request prompt) with a hint line. All keys go through one global
- * handler that runs the vim-style keymaps (`keymap.ts`) through the
- * prefix/count state machine (`keys.ts`) and dispatches actions.
+ * pending request prompt) with a hint line, plus the picker overlays (`:t`,
+ * `:p`, `:m`, `:mode`, `:queue`) drawn over the transcript. All keys go
+ * through one global handler that picks the keymap layer for the current
+ * view (`keymap.ts`), runs it through the prefix/count state machine
+ * (`keys.ts`) and dispatches actions.
  */
 import type {
   InputRenderable,
@@ -11,33 +13,60 @@ import type {
   TextareaRenderable,
 } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
-import type { ThreadId } from "@t3tools/contracts";
+import {
+  DEFAULT_RUNTIME_MODE,
+  type ModelSelection,
+  type ProjectId,
+  type RunId,
+  type RuntimeMode,
+  type ThreadId,
+} from "@t3tools/contracts";
 import {
   type Accessor,
   createEffect,
   createMemo,
   createSignal,
+  Match,
   on,
   onCleanup,
   onMount,
   Show,
+  Switch,
+  untrack,
 } from "solid-js";
-import { createStore, reconcile } from "solid-js/store";
+import { createStore, reconcile, unwrap } from "solid-js/store";
 
 import type { DeliveryIntent } from "../commands.ts";
+import { selectProjectGroups } from "../state/selectors.ts";
 import type {
   DisplayItem,
   PendingApproval,
   PendingOtherRequest,
   PendingUserInput,
+  ProjectGroup,
+  QueuedRun,
+  ThreadSummary,
   ToolCallDisplayItem,
 } from "../state/types.ts";
-import { type Backend, describeError } from "./backend.ts";
+import { type Backend, describeError, type ModelCatalog } from "./backend.ts";
 import { copyToClipboard } from "./clipboard.ts";
-import { type Command, parseCommandLine, WRITE_MESSAGE } from "./cmdline.ts";
+import {
+  type Command,
+  Completer,
+  type CompletionSources,
+  LineHistory,
+  parseCommandLine,
+  quitBlocker,
+  WRITE_MESSAGE,
+} from "./cmdline.ts";
 import { Composer } from "./components/Composer.tsx";
+import { ConfirmLine } from "./components/ConfirmLine.tsx";
 import { HelpOverlay } from "./components/HelpOverlay.tsx";
+import { buildModelRows, type ModelChoice, ModelPicker } from "./components/ModelPicker.tsx";
+import { buildModeRows, ModePicker } from "./components/ModePicker.tsx";
+import { buildProjectRows, ProjectPicker } from "./components/ProjectPicker.tsx";
 import { PromptLine } from "./components/PromptLine.tsx";
+import { buildQueueRows, QueueView } from "./components/QueueView.tsx";
 import {
   approveOptionIndex,
   denyOptionIndex,
@@ -45,8 +74,10 @@ import {
   type UserInputProgress,
 } from "./components/RequestPrompt.tsx";
 import { type StatusInfo, StatusLine } from "./components/StatusLine.tsx";
+import { buildThreadRows, ThreadPicker, threadIndex } from "./components/ThreadPicker.tsx";
 import { Transcript, type TranscriptController } from "./components/Transcript.tsx";
 import type { RowContext, ToolResultState } from "./components/TranscriptItem.tsx";
+import { fuzzyFilter } from "./fuzzy.ts";
 import { type ActionId, type CompiledKeymaps, compileKeymaps, type Layer } from "./keymap.ts";
 import { type Binding, KeySequencer, keyToken } from "./keys.ts";
 import {
@@ -57,10 +88,25 @@ import {
   isTool,
   itemText,
   matchesQuery,
+  oneLine,
   stepThread,
 } from "./nav.ts";
+import {
+  clampCursor,
+  moveCursor,
+  type PickerRow,
+  reorderTarget,
+  selectableIndices,
+} from "./picker.ts";
 import { colors, createSyntaxStyle, SPINNER_FRAMES } from "./theme.ts";
-import { createUiState, type Mode } from "./view.ts";
+import {
+  type Confirm,
+  createUiState,
+  isPickerView,
+  type Mode,
+  type PickerView,
+  type View,
+} from "./view.ts";
 
 export const NO_THREAD_PLACEHOLDER = "No thread open. Press : then t to pick a thread";
 
@@ -83,6 +129,37 @@ interface InputProgressState extends UserInputProgress {
 
 const EMPTY_PROGRESS: InputProgressState = { question: 0, selected: [], answers: {} };
 
+/** Pickers with a filter input; the others (modes, queue) are plain lists. */
+const FILTERED_PICKERS: ReadonlySet<View> = new Set<View>(["threads", "projects", "models"]);
+
+const PICKER_HINTS: Readonly<Record<PickerView, string>> = {
+  threads:
+    "type to filter · ↑↓ C-n C-p (j k) move · Enter open · dd archive · C-a archived · Esc clear/close",
+  projects: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
+  models: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
+  modes: "j k move · Enter set the mode · Esc close",
+  queue: "j k move · dd cancel · J K reorder · Esc close",
+};
+
+/** A text prompt in the bottom line (the `input` view), e.g. a new thread's title. */
+interface InputPrompt {
+  readonly prefix: string;
+  readonly hint: string;
+  readonly onSubmit: (text: string) => void;
+}
+
+/** A thread being created by `:n`, waiting for its project, title or model. */
+interface NewThreadDraft {
+  readonly projectId: ProjectId | null;
+  readonly title: string | null;
+}
+
+const homeDirectory = process.env.HOME ?? "";
+const displayPath = (path: string) =>
+  homeDirectory !== "" && (path === homeDirectory || path.startsWith(`${homeDirectory}/`))
+    ? `~${path.slice(homeDirectory.length)}`
+    : path;
+
 export function App(props: AppProps) {
   const renderer = useRenderer();
   const dimensions = useTerminalDimensions();
@@ -96,6 +173,7 @@ export function App(props: AppProps) {
   let transcript: TranscriptController | undefined;
   let textarea: TextareaRenderable | undefined;
   let lineInput: InputRenderable | undefined;
+  let filterInput: InputRenderable | undefined;
   let helpScroll: ScrollBoxRenderable | undefined;
   let sequenceTimer: ReturnType<typeof setTimeout> | undefined;
   let lastCtrlC = 0;
@@ -130,9 +208,12 @@ export function App(props: AppProps) {
   const promptActive = () => promptShown() && ui.promptFocused() && ui.view() === "transcript";
   const lineKind = () => {
     const view = ui.view();
-    return view === "command" || view === "search" ? view : null;
+    return view === "command" || view === "search" || view === "input" ? view : null;
   };
-  const mode = (): Mode => (lineKind() !== null ? "command" : ui.mode());
+  const mode = (): Mode => {
+    if (isPickerView(ui.view())) return "picker";
+    return lineKind() !== null ? "command" : ui.mode();
+  };
 
   const [progress, setProgress] = createSignal<InputProgressState>(EMPTY_PROGRESS);
   createEffect(
@@ -221,8 +302,10 @@ export function App(props: AppProps) {
   };
 
   const hint = () => {
+    const view = ui.view();
+    if (isPickerView(view)) return PICKER_HINTS[view];
     if (mode() === "insert") {
-      return "Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S steer · Esc normal · Ctrl-C clear";
+      return "Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S steer · Ctrl-Q queue · Esc normal · Ctrl-C clear";
     }
     const request = answerable();
     if (request !== undefined && promptActive()) {
@@ -231,7 +314,8 @@ export function App(props: AppProps) {
         : "1-9 answer · y submit selection · Esc back to the transcript";
     }
     if (request !== undefined) return "Enter back to the request · :a approve · :d deny · ? help";
-    if (threadId() === null) return ": command · ? help · Ctrl-C twice to quit";
+    if (threadId() === null)
+      return ":t threads · :n new thread · : command · ? help · Ctrl-C twice to quit";
     return "i write · j/k scroll · ]] [[ messages · ]t [t tools · za fold · y yank · / search · : cmd · ? help";
   };
 
@@ -241,6 +325,7 @@ export function App(props: AppProps) {
   const notice = ui.setNotice;
 
   const openThread = (id: ThreadId) => {
+    if (ui.mode() === "insert") ui.setMode("normal");
     ui.setFocusedId(null);
     ui.foldAll(false);
     ui.setFollow(true);
@@ -388,9 +473,13 @@ export function App(props: AppProps) {
     }
     textarea?.setText("");
     transcript?.toBottom();
-    backend.send(id, text, intent).then(
+    const titleSeed = untitled.has(id) ? text : undefined;
+    untitled.delete(id);
+    backend.send(id, text, intent, titleSeed === undefined ? {} : { titleSeed }).then(
       () => {
         if (intent === "steer") notice("steered");
+        else if (intent === "queue" && thread.activeRun() !== null)
+          notice("queued · :queue to manage");
       },
       (error) => {
         if (textarea !== undefined && textarea.plainText === "") textarea.setText(text);
@@ -540,16 +629,531 @@ export function App(props: AppProps) {
     notice(`/${query} [${position}/${total}]`);
   };
 
-  const openLine = (kind: "command" | "search") => ui.setView(kind);
-  const closeLine = () => ui.setView("transcript");
+  // -------------------------------------------------------------------------
+  // Command line, text prompt and pickers
+
+  const histories = { command: new LineHistory(), search: new LineHistory() };
+  const completer = new Completer();
+  const [inputPrompt, setInputPrompt] = createSignal<InputPrompt | null>(null);
+  /** Threads created untitled here; their first message seeds the server's auto-title. */
+  const untitled = new Set<string>();
+
+  const openLine = (kind: "command" | "search") => {
+    histories[kind].reset();
+    completer.reset();
+    ui.setView(kind);
+  };
+  const closeLine = () => {
+    setInputPrompt(null);
+    ui.setView("transcript");
+  };
+  const setLine = (text: string) => {
+    if (lineInput === undefined) return;
+    lineInput.value = text;
+    lineInput.gotoBufferEnd();
+  };
+
+  const askText = (prompt: InputPrompt) => {
+    setInputPrompt(prompt);
+    ui.setView("input");
+  };
+
+  const ask = (message: string, onYes: () => void) => ui.setConfirm({ message, onYes });
+
+  // Picker state. The cursor is remembered by row key so it stays on the same
+  // entry while the list changes underneath (streaming status, new threads).
+  const [pickerFilter, setPickerFilter] = createSignal("");
+  const [cursorIndex, setCursorIndex] = createSignal(0);
+  const [cursorKey, setCursorKey] = createSignal<string | null>(null);
+  const [threadProject, setThreadProject] = createSignal<ProjectId | null>(null);
+  const [showArchived, setShowArchived] = createSignal(false);
+  const [projectPurpose, setProjectPurpose] = createSignal<"narrow" | "new">("narrow");
+  const [modelPurpose, setModelPurpose] = createSignal<"set" | "new">("set");
+  const [draft, setDraft] = createSignal<NewThreadDraft | null>(null);
+  const [catalog, setCatalog] = createSignal<ModelCatalog | null>(null);
+  /** The model picked last in this session; new threads prefer it over the server default. */
+  const [lastModel, setLastModel] = createSignal<ModelSelection | null>(null);
+
+  const pickerWidth = () => Math.max(20, Math.min(110, dimensions().width - 4)) - 4;
+
+  const [archived, setArchived] = createSignal<ReadonlyArray<ThreadSummary>>([]);
+  const pickerGroups = createMemo((): ReadonlyArray<ProjectGroup> => {
+    const groups = shell.groups();
+    if (!showArchived()) return groups;
+    const extra = archived();
+    return untrack(() => {
+      const state = unwrap(shell.state);
+      const threads: Record<string, ThreadSummary> = { ...state.threads };
+      for (const entry of extra) threads[entry.id] ??= entry;
+      return selectProjectGroups({ ...state, threads }, { includeArchived: true });
+    });
+  });
+
+  const toggleArchived = () => {
+    if (showArchived()) {
+      setShowArchived(false);
+      return;
+    }
+    setShowArchived(true);
+    backend
+      .archivedThreads()
+      .then(setArchived, (error) =>
+        notice(`could not load archived threads: ${describeError(error)}`, "error", 6_000),
+      );
+  };
+
+  const currentModel = (): ModelSelection | null =>
+    thread.state.thread?.modelSelection ?? summary()?.modelSelection ?? null;
+
+  const pickerList = createMemo((): { rows: ReadonlyArray<PickerRow>; initial: number } => {
+    const view = ui.view();
+    const query = pickerFilter();
+    switch (view) {
+      case "threads": {
+        const built = buildThreadRows(pickerGroups(), {
+          query,
+          projectId: threadProject(),
+          now: Date.now(),
+          width: pickerWidth(),
+          openThreadId: threadId(),
+        });
+        return { rows: built.rows, initial: built.best };
+      }
+      case "projects":
+        return {
+          rows: buildProjectRows(shell.groups(), {
+            query,
+            now: Date.now(),
+            width: pickerWidth(),
+            displayPath,
+          }),
+          initial: 0,
+        };
+      case "models": {
+        const loaded = catalog();
+        if (loaded === null) return { rows: [], initial: 0 };
+        const built = buildModelRows(loaded, {
+          query,
+          current: modelPurpose() === "set" ? currentModel() : null,
+          width: pickerWidth(),
+        });
+        return { rows: built.rows, initial: built.initial };
+      }
+      case "modes": {
+        const current = thread.state.thread?.runtimeMode ?? null;
+        const instanceId = currentModel()?.instanceId;
+        const provider = catalog()?.providers.find((entry) => entry.instanceId === instanceId);
+        const rows = buildModeRows({ current, supported: provider?.supportedRuntimeModes ?? null });
+        return {
+          rows,
+          initial: Math.max(
+            0,
+            rows.findIndex((row) => row.value === current),
+          ),
+        };
+      }
+      case "queue":
+        return { rows: buildQueueRows(thread.queue(), pickerWidth()), initial: 0 };
+      default:
+        return { rows: [], initial: 0 };
+    }
+  });
+  const pickerSelectable = createMemo(() => selectableIndices(pickerList().rows));
+  /** Index into the selectable rows. */
+  const pickerCursor = createMemo(() => {
+    const rows = pickerList().rows;
+    const selectable = pickerSelectable();
+    const key = cursorKey();
+    if (key !== null) {
+      const found = selectable.findIndex((index) => rows[index]?.key === key);
+      if (found !== -1) return found;
+    }
+    return clampCursor(cursorIndex(), selectable.length);
+  });
+  const pickerCursorRow = () => pickerSelectable()[pickerCursor()] ?? -1;
+  const pickerSelected = (): PickerRow | undefined => pickerList().rows[pickerCursorRow()];
+
+  const setCursor = (index: number) => {
+    const selectable = pickerSelectable();
+    const next = clampCursor(index, selectable.length);
+    setCursorIndex(next);
+    setCursorKey(pickerList().rows[selectable[next] ?? -1]?.key ?? null);
+  };
+
+  const openPicker = (view: PickerView, filter = "", cursorOn: string | null = null) => {
+    setPickerFilter(filter);
+    setCursorKey(null);
+    setCursorIndex(0);
+    ui.setView(view);
+    if (cursorOn !== null && filter === "") {
+      const rows = pickerList().rows;
+      const found = pickerSelectable().findIndex((index) => rows[index]?.key === cursorOn);
+      if (found !== -1) {
+        setCursor(found);
+        return;
+      }
+    }
+    setCursor(pickerList().initial);
+  };
+
+  const closePicker = () => {
+    ui.setView("transcript");
+    setPickerFilter("");
+    setDraft(null);
+  };
+
+  const onFilter = (value: string) => {
+    setPickerFilter(value);
+    setCursorKey(null);
+    setCursor(pickerList().initial);
+  };
+
+  /** Types text into the picker filter (keys a list binding swallowed). */
+  const typeIntoFilter = (text: string) => {
+    if (!FILTERED_PICKERS.has(ui.view()) || filterInput === undefined) return;
+    filterInput.insertText(text);
+    onFilter(filterInput.value);
+  };
+
+  const loadCatalog = (refresh = false): Promise<ModelCatalog | null> =>
+    backend.modelCatalog(refresh).then(
+      (loaded) => {
+        setCatalog(loaded);
+        return loaded;
+      },
+      (error) => {
+        notice(`could not load models: ${describeError(error)}`, "error", 6_000);
+        return null;
+      },
+    );
+
+  const openThreadPicker = (filter = "", projectId: ProjectId | null = null) => {
+    setThreadProject(projectId);
+    openPicker("threads", filter, threadId());
+  };
+
+  const openProjectPicker = (purpose: "narrow" | "new") => {
+    setProjectPurpose(purpose);
+    const projectId = thread.state.thread?.projectId ?? summary()?.projectId ?? null;
+    openPicker("projects", "", projectId);
+  };
+
+  const openModelPicker = (purpose: "set" | "new") => {
+    if (purpose === "set" && threadId() === null) {
+      notice("no thread open", "warn");
+      return;
+    }
+    setModelPurpose(purpose);
+    const current = purpose === "set" ? currentModel() : null;
+    openPicker("models");
+    void loadCatalog().then((loaded) => {
+      if (loaded === null) {
+        if (ui.view() === "models") closePicker();
+        return;
+      }
+      if (ui.view() !== "models" || pickerFilter() !== "") return;
+      setCursorKey(current === null ? null : `${current.instanceId}/${current.model}`);
+      if (current === null) setCursor(pickerList().initial);
+    });
+  };
+
+  const openModePicker = () => {
+    if (threadId() === null) {
+      notice("no thread open", "warn");
+      return;
+    }
+    openPicker("modes");
+    if (catalog() === null) void loadCatalog();
+  };
+
+  const openQueue = () => {
+    if (threadId() === null) {
+      notice("no thread open", "warn");
+      return;
+    }
+    openPicker("queue");
+  };
+
+  // New threads ------------------------------------------------------------
+
+  /** Project default, then the model last picked here, then the project's newest thread, then the server's default. */
+  const defaultModelFor = (projectId: ProjectId, loaded: ModelCatalog | null) => {
+    const project = shell.state.projects[projectId];
+    if (project?.defaultModelSelection != null) return project.defaultModelSelection;
+    const last = lastModel();
+    if (last !== null) return last;
+    const newest = shell.groups().find((group) => group.projectId === projectId)?.threads[0];
+    if (newest !== undefined) return newest.modelSelection;
+    if (loaded?.defaultModelSelection != null) return loaded.defaultModelSelection;
+    for (const provider of loaded?.providers ?? []) {
+      const model = provider.models.find((candidate) => candidate.isDefault);
+      if (model !== undefined) return { instanceId: provider.instanceId, model: model.slug };
+    }
+    return null;
+  };
+
+  const createNewThread = async (
+    projectId: ProjectId,
+    title: string,
+    chosen: ModelSelection | null,
+  ) => {
+    const loaded = catalog() ?? (await loadCatalog());
+    const modelSelection = chosen ?? defaultModelFor(projectId, loaded);
+    if (modelSelection === null) {
+      // Nothing to go on: ask for the model first.
+      setDraft({ projectId, title });
+      notice("pick a model for the new thread");
+      setModelPurpose("new");
+      openPicker("models");
+      return;
+    }
+    const runtimeMode: RuntimeMode = loaded?.defaultRuntimeMode ?? DEFAULT_RUNTIME_MODE;
+    notice("creating thread…");
+    try {
+      const id = await backend.createThread({ projectId, title, modelSelection, runtimeMode });
+      if (title.trim() === "") untitled.add(id);
+      openThread(id);
+      ui.setView("transcript");
+      ui.setMode("insert");
+      notice(`created ${title.trim() === "" ? "an untitled thread" : `"${title.trim()}"`}`);
+    } catch (error) {
+      notice(`could not create the thread: ${describeError(error)}`, "error", 6_000);
+    }
+  };
+
+  const continueNewThread = (projectId: ProjectId) => {
+    const title = draft()?.title ?? null;
+    setDraft(null);
+    if (title !== null) {
+      ui.setView("transcript");
+      void createNewThread(projectId, title, null);
+      return;
+    }
+    const projectTitle = shell.state.projects[projectId]?.title ?? "project";
+    askText({
+      prefix: `title for a new thread in ${projectTitle} (empty: untitled): `,
+      hint: "Enter create · Esc cancel",
+      onSubmit: (text) => void createNewThread(projectId, text.trim(), null),
+    });
+  };
+
+  const startNewThread = (title: string | null) => {
+    setDraft({ projectId: null, title });
+    openProjectPicker("new");
+  };
+
+  // Picker actions ---------------------------------------------------------
+
+  const pickerSelect = () => {
+    const view = ui.view();
+    const row = pickerSelected();
+    if (row === undefined || row.kind !== "item") {
+      if (view === "queue" || pickerList().rows.length === 0) closePicker();
+      return;
+    }
+    switch (view) {
+      case "threads": {
+        const target = row.value as ThreadSummary;
+        closePicker();
+        if (target.id !== threadId()) openThread(target.id);
+        return;
+      }
+      case "projects": {
+        const group = row.value as ProjectGroup;
+        if (projectPurpose() === "new") {
+          continueNewThread(group.projectId);
+          return;
+        }
+        setPickerFilter("");
+        openThreadPicker("", group.projectId);
+        return;
+      }
+      case "models": {
+        const choice = row.value as ModelChoice;
+        const selection: ModelSelection = { instanceId: choice.instanceId, model: choice.model };
+        setLastModel(selection);
+        if (modelPurpose() === "new") {
+          const pending = draft();
+          closePicker();
+          if (pending?.projectId != null) {
+            void createNewThread(pending.projectId, pending.title ?? "", selection);
+          }
+          return;
+        }
+        const id = threadId();
+        closePicker();
+        if (id === null) return;
+        backend.setModel(id, selection).then(
+          () => notice(`model: ${choice.label}`),
+          (error) => notice(`could not set the model: ${describeError(error)}`, "error", 6_000),
+        );
+        return;
+      }
+      case "modes": {
+        const runtimeMode = row.value as RuntimeMode;
+        const id = threadId();
+        closePicker();
+        if (id === null) return;
+        backend.setRuntimeMode(id, runtimeMode).then(
+          () => notice(`runtime mode: ${runtimeMode}`),
+          (error) => notice(`could not set the mode: ${describeError(error)}`, "error", 6_000),
+        );
+        return;
+      }
+      case "queue":
+        closePicker();
+        return;
+    }
+  };
+
+  const archiveThread = (target: { readonly id: ThreadId; readonly title: string }) => {
+    ask(`archive "${target.title}"?`, () => {
+      backend.archive(target.id).then(
+        () => notice(`archived "${target.title}"`),
+        (error) => notice(`could not archive: ${describeError(error)}`, "error", 6_000),
+      );
+    });
+  };
+
+  const pickerDelete = () => {
+    const view = ui.view();
+    const row = pickerSelected();
+    if (view === "threads") {
+      if (row?.kind !== "item") return;
+      const target = row.value as ThreadSummary;
+      if (target.archived) {
+        notice("already archived", "warn");
+        return;
+      }
+      archiveThread(target);
+      return;
+    }
+    if (view === "queue") {
+      const id = threadId();
+      if (row?.kind !== "item" || id === null) return;
+      const run = row.value as QueuedRun;
+      const label = oneLine(run.text ?? "queued message", 40);
+      ask(`cancel queued "${label}"?`, () => {
+        backend.cancelQueued(id, run.runId).then(
+          () => notice("queued message cancelled"),
+          (error) => notice(`could not cancel: ${describeError(error)}`, "error", 6_000),
+        );
+      });
+      return;
+    }
+    typeIntoFilter("dd");
+  };
+
+  const pickerMove = (delta: -1 | 1, key: string) => {
+    if (ui.view() !== "queue") {
+      typeIntoFilter(key);
+      return;
+    }
+    const id = threadId();
+    const queue = thread.queue();
+    const target = reorderTarget(
+      queue.map((run) => run.runId),
+      pickerCursor(),
+      delta,
+    );
+    if (id === null || target === null) return;
+    backend
+      .reorderQueued(id, target.runId as RunId, target.beforeRunId as RunId | null)
+      .catch((error) => notice(`could not reorder: ${describeError(error)}`, "error", 6_000));
+  };
+
+  const pickerCancel = () => {
+    if (FILTERED_PICKERS.has(ui.view()) && pickerFilter() !== "") {
+      if (filterInput !== undefined) filterInput.value = "";
+      onFilter("");
+      return;
+    }
+    closePicker();
+  };
+
+  // Commands ---------------------------------------------------------------
+
+  const jumpToThread = (target: number | string) => {
+    const list = threadIndex(shell.groups());
+    let found: ThreadSummary | undefined;
+    if (typeof target === "number") {
+      found = list[target - 1];
+      if (found === undefined) {
+        notice(`no thread ${target} (1-${list.length})`, "error");
+        return;
+      }
+    } else {
+      const lowered = target.toLowerCase();
+      found =
+        list.find((candidate) => candidate.title.toLowerCase() === lowered) ??
+        fuzzyFilter(list, target, (candidate) => candidate.title)[0]?.item;
+      if (found === undefined) {
+        notice(`no thread matches "${target}"`, "error");
+        return;
+      }
+    }
+    if (found.id !== threadId()) openThread(found.id);
+  };
+
+  const narrowToProject = (name: string) => {
+    const groups = shell.groups();
+    const lowered = name.toLowerCase();
+    const group =
+      groups.find((candidate) => candidate.title.toLowerCase() === lowered) ??
+      fuzzyFilter(groups, name, (candidate) => candidate.title)[0]?.item;
+    if (group === undefined) {
+      notice(`no project matches "${name}"`, "error");
+      return;
+    }
+    openThreadPicker("", group.projectId);
+  };
+
+  const completionSources = (): CompletionSources => ({
+    threads: threadIndex(shell.groups()).map((candidate) => candidate.title),
+    projects: shell.groups().map((group) => group.title),
+  });
+
+  const completeLine = () => {
+    if (lineKind() !== "command" || lineInput === undefined) return;
+    const result = completer.complete(lineInput.value, completionSources());
+    if (result === null) {
+      notice("no completions", "warn");
+      return;
+    }
+    setLine(result.text);
+    if (result.candidates.length > 1) {
+      const shown = result.candidates
+        .map((candidate, index) => (index === result.index ? `[${candidate}]` : candidate))
+        .join(" ");
+      notice(shown, "info", 6_000);
+    }
+  };
+
+  const browseHistory = (direction: "older" | "newer") => {
+    const kind = lineKind();
+    if ((kind !== "command" && kind !== "search") || lineInput === undefined) return;
+    const history = histories[kind];
+    const text = direction === "older" ? history.older(lineInput.value) : history.newer();
+    if (text !== null) setLine(text);
+    completer.reset();
+  };
 
   const runCommand = (command: Command) => {
     switch (command.type) {
       case "noop":
         return;
-      case "quit":
+      case "quit": {
+        const blocker = quitBlocker(
+          command.force,
+          threadId() !== null && thread.activeRun() !== null,
+        );
+        if (blocker !== null) {
+          notice(blocker, "warn", 6_000);
+          return;
+        }
         props.onQuit();
         return;
+      }
       case "write":
         notice(WRITE_MESSAGE);
         return;
@@ -558,6 +1162,53 @@ export function App(props: AppProps) {
         return;
       case "deny":
         deny();
+        return;
+      case "threads":
+        openThreadPicker(command.filter);
+        return;
+      case "projects":
+        if (command.name === "") openProjectPicker("narrow");
+        else narrowToProject(command.name);
+        return;
+      case "new":
+        startNewThread(command.title);
+        return;
+      case "model":
+        openModelPicker("set");
+        return;
+      case "mode":
+        openModePicker();
+        return;
+      case "thread":
+        jumpToThread(command.target);
+        return;
+      case "threadNext":
+        cycleThread(1);
+        return;
+      case "threadPrev":
+        cycleThread(-1);
+        return;
+      case "queue":
+        openQueue();
+        return;
+      case "help":
+        ui.setView("help");
+        return;
+      case "archive": {
+        const id = threadId();
+        if (id === null) {
+          notice("no thread open", "warn");
+          return;
+        }
+        archiveThread({ id, title: info().title ?? id });
+        return;
+      }
+      case "reconnect":
+        backend.reconnect();
+        notice("reconnecting…");
+        return;
+      case "usage":
+        notice(command.message, "warn");
         return;
       case "unknown":
         notice(`unknown command: ${command.name}`, "error");
@@ -568,13 +1219,26 @@ export function App(props: AppProps) {
   const submitLine = () => {
     const kind = lineKind();
     const text = lineInput?.value ?? "";
+    const prompt = inputPrompt();
     closeLine();
     if (kind === "command") {
+      histories.command.push(text);
       runCommand(parseCommandLine(text));
     } else if (kind === "search") {
+      histories.search.push(text);
       if (text !== "") ui.setSearchQuery(text);
       searchStep(1);
+    } else if (kind === "input" && prompt !== null) {
+      prompt.onSubmit(text);
     }
+  };
+
+  const confirmAnswer = (yes: boolean) => {
+    const pending = ui.confirm();
+    ui.setConfirm(null);
+    if (pending === null) return;
+    if (yes) pending.onYes();
+    else notice("cancelled");
   };
 
   const ctrlC = () => {
@@ -667,6 +1331,8 @@ export function App(props: AppProps) {
         return send("auto");
       case "input.steer":
         return send("steer");
+      case "input.queue":
+        return send("queue");
       case "input.newline":
         textarea?.newLine();
         return;
@@ -677,6 +1343,39 @@ export function App(props: AppProps) {
         return submitLine();
       case "line.cancel":
         return closeLine();
+      case "line.complete":
+        return completeLine();
+      case "line.older":
+        return browseHistory("older");
+      case "line.newer":
+        return browseHistory("newer");
+      case "picker.down":
+        return setCursor(moveCursor(pickerCursor(), n, pickerSelectable().length));
+      case "picker.up":
+        return setCursor(moveCursor(pickerCursor(), -n, pickerSelectable().length));
+      case "picker.pageDown":
+        return setCursor(moveCursor(pickerCursor(), 10 * n, pickerSelectable().length));
+      case "picker.pageUp":
+        return setCursor(moveCursor(pickerCursor(), -10 * n, pickerSelectable().length));
+      case "picker.select":
+        return pickerSelect();
+      case "picker.cancel":
+        return pickerCancel();
+      case "picker.close":
+        return closePicker();
+      case "picker.delete":
+        return pickerDelete();
+      case "picker.moveDown":
+        return pickerMove(1, "J");
+      case "picker.moveUp":
+        return pickerMove(-1, "K");
+      case "picker.toggleArchived":
+        if (ui.view() === "threads") toggleArchived();
+        return;
+      case "confirm.yes":
+        return confirmAnswer(true);
+      case "confirm.no":
+        return confirmAnswer(false);
     }
   };
 
@@ -684,6 +1383,11 @@ export function App(props: AppProps) {
   // Keyboard
 
   const currentLayer = (): Layer => {
+    if (ui.confirm() !== null) return "confirm";
+    const view = ui.view();
+    if (isPickerView(view)) {
+      return FILTERED_PICKERS.has(view) && pickerFilter() !== "" ? "picker" : "pickerList";
+    }
     if (lineKind() !== null) return "line";
     if (ui.mode() === "insert") return "insert";
     return promptActive() ? "prompt" : "normal";
@@ -716,14 +1420,13 @@ export function App(props: AppProps) {
     }
   };
 
-  useKeyboard((event: KeyEvent) => {
-    if (event.eventType === "release") return;
-    const token = keyToken(event);
-    if (ui.view() === "help") {
-      event.preventDefault();
-      handleHelpKey(token);
-      return;
-    }
+  /** Keys a picker list binding held back (`d` waiting for `dd`) that turned out to be typing. */
+  const retypeDropped = (layer: Layer, keys: string) => {
+    if (layer !== "pickerList" || keys === "" || keys.includes("<")) return;
+    typeIntoFilter(keys);
+  };
+
+  const feed = (event: KeyEvent, token: string, retry: boolean) => {
     const layer = currentLayer();
     const result = sequencer.feed(token, keymaps[layer], {
       allowCount: layer === "normal" || layer === "prompt",
@@ -736,9 +1439,11 @@ export function App(props: AppProps) {
         event.preventDefault();
         sequenceTimer = setTimeout(() => {
           sequenceTimer = undefined;
-          const late = sequencer.timeout(keymaps[currentLayer()]);
+          const lateLayer = currentLayer();
+          const late = sequencer.timeout(keymaps[lateLayer]);
           ui.setPendingKeys("");
           if (late?.type === "action") runAction(late.binding, late.count);
+          else if (late?.type === "unbound") retypeDropped(lateLayer, late.keys);
         }, sequencer.timeoutMs);
         return;
       case "action":
@@ -747,12 +1452,41 @@ export function App(props: AppProps) {
         return;
       case "unbound":
         event.preventDefault();
+        // In a picker, a held-back prefix plus a key that completes nothing
+        // was typing: put the prefix into the filter and handle the key anew.
+        if (layer === "pickerList" && !retry) {
+          retypeDropped(layer, result.keys.slice(0, result.keys.length - token.length));
+          feed(event, token, true);
+        }
         return;
-      case "passthrough":
+      case "passthrough": {
         // Typing goes to the focused input; elsewhere unbound keys do nothing.
-        if (layer === "normal" || layer === "prompt") event.preventDefault();
+        const typing =
+          layer === "insert" ||
+          layer === "line" ||
+          ((layer === "picker" || layer === "pickerList") && FILTERED_PICKERS.has(ui.view()));
+        if (!typing) {
+          event.preventDefault();
+          return;
+        }
+        if (retry && token.length === 1) {
+          // The event was already marked handled; type the key ourselves.
+          typeIntoFilter(token);
+        }
         return;
+      }
     }
+  };
+
+  useKeyboard((event: KeyEvent) => {
+    if (event.eventType === "release") return;
+    const token = keyToken(event);
+    if (ui.view() === "help" && ui.confirm() === null) {
+      event.preventDefault();
+      handleHelpKey(token);
+      return;
+    }
+    feed(event, token, false);
   });
 
   // -------------------------------------------------------------------------
@@ -810,22 +1544,102 @@ export function App(props: AppProps) {
         )}
       </Show>
       <Show
-        when={lineKind()}
+        when={ui.confirm()}
         fallback={
-          <text fg={colors.faint} flexShrink={0} wrapMode="none">
-            {` ${hint()}`}
-          </text>
+          <Show
+            when={lineKind()}
+            fallback={
+              <text fg={colors.faint} flexShrink={0} wrapMode="none">
+                {` ${hint()}`}
+              </text>
+            }
+          >
+            {(kind: Accessor<"command" | "search" | "input">) => (
+              <PromptLine
+                prefix={() =>
+                  kind() === "command"
+                    ? ":"
+                    : kind() === "search"
+                      ? "/"
+                      : (inputPrompt()?.prefix ?? "> ")
+                }
+                ref={(element) => {
+                  lineInput = element;
+                }}
+              />
+            )}
+          </Show>
         }
       >
-        {(kind: Accessor<"command" | "search">) => (
-          <PromptLine
-            prefix={() => (kind() === "command" ? ":" : "/")}
-            ref={(element) => {
-              lineInput = element;
-            }}
-          />
-        )}
+        {(pending: Accessor<Confirm>) => <ConfirmLine message={() => pending().message} />}
       </Show>
+      <Switch>
+        <Match when={ui.view() === "threads"}>
+          <ThreadPicker
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            projectTitle={() => {
+              const projectId = threadProject();
+              return projectId === null
+                ? null
+                : (shell.state.projects[projectId]?.title ?? projectId);
+            }}
+            showArchived={showArchived}
+            initialFilter={untrack(pickerFilter)}
+            onFilter={onFilter}
+            inputRef={(element) => {
+              filterInput = element;
+            }}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "projects"}>
+          <ProjectPicker
+            title={() => (projectPurpose() === "new" ? "New thread · project" : "Projects")}
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            initialFilter={untrack(pickerFilter)}
+            onFilter={onFilter}
+            inputRef={(element) => {
+              filterInput = element;
+            }}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "models"}>
+          <ModelPicker
+            title={() => (modelPurpose() === "new" ? "New thread · model" : "Model")}
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            loading={() => catalog() === null}
+            initialFilter={untrack(pickerFilter)}
+            onFilter={onFilter}
+            inputRef={(element) => {
+              filterInput = element;
+            }}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "modes"}>
+          <ModePicker
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "queue"}>
+          <QueueView
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+      </Switch>
       <Show when={ui.view() === "help"}>
         <HelpOverlay
           ref={(element) => {

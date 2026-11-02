@@ -583,7 +583,18 @@ describe("shell reducers", () => {
       location: "archive",
       thread: threadShell("thread-a", { archivedAt: NOW }),
     });
-    expect(applyShellStreamItem(next, archived).threads["thread-a"]?.archived).toBe(true);
+    const afterArchive = applyShellStreamItem(next, archived);
+    expect(afterArchive.threads["thread-a"]?.archived).toBe(true);
+    // A "removed from active" after the archive update keeps the archived entry.
+    const removedFromActive = decodeShellItem({
+      kind: "thread.removed",
+      sequence: 104,
+      location: "active",
+      threadId: "thread-a",
+    });
+    expect(
+      applyShellStreamItem(afterArchive, removedFromActive).threads["thread-a"]?.archived,
+    ).toBe(true);
   });
 });
 

@@ -9,6 +9,7 @@
  * and epoch milliseconds instead.
  */
 import type {
+  ModelSelection,
   OrchestrationProjectShell,
   OrchestrationV2AppThread,
   OrchestrationV2ConversationMessage,
@@ -68,6 +69,7 @@ export interface ThreadSummary {
   readonly pendingRequest: OrchestrationV2PendingRuntimeRequestSummary | null;
   /** `instanceId/model` */
   readonly model: string;
+  readonly modelSelection: ModelSelection;
   readonly branch: string | null;
   readonly lastError: string | null;
   readonly latestMessage: { readonly role: string; readonly preview: string } | null;

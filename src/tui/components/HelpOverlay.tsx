@@ -2,6 +2,7 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { For } from "solid-js";
 
+import { COMMAND_SPECS } from "../cmdline.ts";
 import { DEFAULT_KEYMAPS, helpRows } from "../keymap.ts";
 import { colors } from "../theme.ts";
 
@@ -11,17 +12,20 @@ const SECTIONS = [
   { title: "INSERT (message input)", rows: helpRows(DEFAULT_KEYMAPS.insert) },
   { title: "Command / search line", rows: helpRows(DEFAULT_KEYMAPS.line) },
   {
-    title: "Commands",
-    rows: [
-      { keys: ":q  :qa", description: "quit" },
-      { keys: ":a  :approve", description: "approve the pending request" },
-      { keys: ":d  :deny", description: "deny the pending request" },
-      { keys: ":w", description: "nothing to save" },
-    ],
+    title: "Pickers (j k dd J K only while the filter is empty)",
+    rows: helpRows([...DEFAULT_KEYMAPS.picker, ...DEFAULT_KEYMAPS.pickerList]),
+  },
+  { title: "Confirm (y/n line)", rows: helpRows(DEFAULT_KEYMAPS.confirm) },
+  {
+    title: "Commands (Tab completes)",
+    rows: COMMAND_SPECS.filter((spec) => spec.usage !== "").map((spec) => ({
+      keys: spec.usage,
+      description: spec.description,
+    })),
   },
 ];
 
-const KEY_WIDTH = 18;
+const KEY_WIDTH = 22;
 
 export function HelpOverlay(props: { ref: (element: ScrollBoxRenderable) => void }) {
   return (

@@ -64,6 +64,7 @@ function fakeConnection(streams: Record<string, Stream.Stream<OrchestrationV2Thr
         sessions: Stream.make(session),
         subscribe: (f) => f(session) as never,
         reconnectNow: Effect.void,
+        forceReconnect: Effect.void,
       });
     }),
   );

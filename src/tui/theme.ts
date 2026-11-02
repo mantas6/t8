@@ -23,6 +23,8 @@ export const colors = {
   modeInsert: "#98c379",
   modeCommand: "#e5c07b",
   modeFg: "#1b1d23",
+  overlayBg: "#16181d",
+  match: "#e5c07b",
 } as const;
 
 const SYNTAX: Readonly<Record<string, StyleDefinitionInput>> = {

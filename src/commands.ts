@@ -27,6 +27,7 @@ import {
   type RuntimeRequestId,
   ThreadId,
   type TurnItemId,
+  WS_METHODS,
 } from "@t3tools/contracts";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -274,4 +275,44 @@ export const fetchTurnItem = Effect.fn("commands.fetchTurnItem")(function* (
   const { client } = yield* (yield* Connection).session;
   const result = yield* client[ORCHESTRATION_V2_WS_METHODS.getTurnItem]({ threadId, itemId });
   return result.item;
+});
+
+/** Drops a queued run (its message is never sent). */
+export const cancelQueuedRun = Effect.fn("commands.cancelQueuedRun")(function* (
+  threadId: ThreadId,
+  runId: RunId,
+) {
+  return yield* dispatch({ type: "queued-run.cancel", commandId: newCommandId(), threadId, runId });
+});
+
+/** Moves a queued run before `beforeRunId`, or to the end of the queue for null. */
+export const reorderQueuedRun = Effect.fn("commands.reorderQueuedRun")(function* (
+  threadId: ThreadId,
+  runId: RunId,
+  beforeRunId: RunId | null,
+) {
+  return yield* dispatch({
+    type: "queued-run.reorder",
+    commandId: newCommandId(),
+    threadId,
+    runId,
+    beforeRunId,
+  });
+});
+
+/**
+ * The server config: provider instances with their models (what upstream's
+ * model picker lists) and the settings holding the default model selection
+ * and runtime mode.
+ */
+export const getServerConfig = Effect.fn("commands.getServerConfig")(function* () {
+  const { client } = yield* (yield* Connection).session;
+  return yield* client[WS_METHODS.serverGetConfig]({});
+});
+
+/** Archived threads (the shell stream only carries active ones). */
+export const getArchivedThreads = Effect.fn("commands.getArchivedThreads")(function* () {
+  const { client } = yield* (yield* Connection).session;
+  const snapshot = yield* client[ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]({});
+  return snapshot.threads;
 });

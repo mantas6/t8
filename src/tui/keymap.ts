@@ -7,11 +7,15 @@
  * - `normal`: transcript focus (the default).
  * - `prompt`: a pending runtime request has focus; consulted before `normal`.
  * - `insert`: the message input has focus; unbound keys go to the input.
- * - `line`: the `:` command line or `/` search prompt has focus.
+ * - `line`: the `:` command line, `/` search prompt or a text prompt has focus.
+ * - `picker`: a picker overlay whose filter has text; typing goes to the filter.
+ * - `pickerList`: a picker with an empty filter (or none): `picker` plus `j`/`k`
+ *   and the list commands (`dd`, `J`/`K`).
+ * - `confirm`: a y/n question in the bottom line.
  */
 import { type Binding, type CompiledKeymap, compileKeymap } from "./keys.ts";
 
-export type Layer = "normal" | "prompt" | "insert" | "line";
+export type Layer = "normal" | "prompt" | "insert" | "line" | "picker" | "pickerList" | "confirm";
 
 export type ActionId =
   | "scroll.lineDown"
@@ -49,10 +53,27 @@ export type ActionId =
   | "request.focus"
   | "input.send"
   | "input.steer"
+  | "input.queue"
   | "input.newline"
   | "input.clear"
   | "line.submit"
-  | "line.cancel";
+  | "line.cancel"
+  | "line.complete"
+  | "line.older"
+  | "line.newer"
+  | "picker.down"
+  | "picker.up"
+  | "picker.pageDown"
+  | "picker.pageUp"
+  | "picker.select"
+  | "picker.cancel"
+  | "picker.close"
+  | "picker.delete"
+  | "picker.moveDown"
+  | "picker.moveUp"
+  | "picker.toggleArchived"
+  | "confirm.yes"
+  | "confirm.no";
 
 export type KeyBinding = Binding<ActionId>;
 
@@ -93,10 +114,27 @@ export const ACTION_DESCRIPTIONS: Readonly<Record<ActionId, string>> = {
   "request.focus": "back to the pending request",
   "input.send": "send",
   "input.steer": "send as steer (into the active run)",
+  "input.queue": "send queued (runs after the active run)",
   "input.newline": "insert a newline",
   "input.clear": "clear the draft and leave INSERT",
   "line.submit": "run",
   "line.cancel": "cancel",
+  "line.complete": "complete the command, thread or project name",
+  "line.older": "older command from history",
+  "line.newer": "newer command from history",
+  "picker.down": "next entry",
+  "picker.up": "previous entry",
+  "picker.pageDown": "a page down",
+  "picker.pageUp": "a page up",
+  "picker.select": "open / choose",
+  "picker.cancel": "clear the filter, then close",
+  "picker.close": "close",
+  "picker.delete": "archive the thread / cancel the queued message (asks first)",
+  "picker.moveDown": "move the queued message down",
+  "picker.moveUp": "move the queued message up",
+  "picker.toggleArchived": "show / hide archived threads",
+  "confirm.yes": "yes",
+  "confirm.no": "no",
 };
 
 const scrollWhileTyping: ReadonlyArray<KeyBinding> = [
@@ -160,6 +198,7 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<C-j>", action: "input.newline" },
     { keys: "<M-CR>", action: "input.newline" },
     { keys: "<C-s>", action: "input.steer" },
+    { keys: "<C-q>", action: "input.queue" },
     { keys: "<C-c>", action: "input.clear" },
     ...scrollWhileTyping,
   ],
@@ -167,6 +206,36 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "<Esc>", action: "line.cancel" },
     { keys: "<C-c>", action: "line.cancel" },
     { keys: "<CR>", action: "line.submit" },
+    { keys: "<Tab>", action: "line.complete" },
+    { keys: "<Up>", action: "line.older" },
+    { keys: "<Down>", action: "line.newer" },
+  ],
+  picker: [
+    { keys: "<Down>", action: "picker.down" },
+    { keys: "<Up>", action: "picker.up" },
+    { keys: "<C-n>", action: "picker.down" },
+    { keys: "<C-p>", action: "picker.up" },
+    { keys: "<PageDown>", action: "picker.pageDown" },
+    { keys: "<PageUp>", action: "picker.pageUp" },
+    { keys: "<CR>", action: "picker.select" },
+    { keys: "<Esc>", action: "picker.cancel" },
+    { keys: "<C-c>", action: "picker.close" },
+    { keys: "<C-a>", action: "picker.toggleArchived" },
+  ],
+  pickerList: [
+    { keys: "j", action: "picker.down" },
+    { keys: "k", action: "picker.up" },
+    { keys: "dd", action: "picker.delete" },
+    { keys: "J", action: "picker.moveDown" },
+    { keys: "K", action: "picker.moveUp" },
+  ],
+  confirm: [
+    { keys: "y", action: "confirm.yes" },
+    { keys: "Y", action: "confirm.yes" },
+    { keys: "n", action: "confirm.no" },
+    { keys: "N", action: "confirm.no" },
+    { keys: "<Esc>", action: "confirm.no" },
+    { keys: "<C-c>", action: "confirm.no" },
   ],
 };
 
@@ -176,6 +245,10 @@ export type CompiledKeymaps = Readonly<{
   prompt: CompiledKeymap<ActionId>;
   insert: CompiledKeymap<ActionId>;
   line: CompiledKeymap<ActionId>;
+  picker: CompiledKeymap<ActionId>;
+  /** `pickerList` layered over `picker`. */
+  pickerList: CompiledKeymap<ActionId>;
+  confirm: CompiledKeymap<ActionId>;
 }>;
 
 /** Compiles the keymaps; `overrides` bindings take precedence over the defaults. */
@@ -188,6 +261,9 @@ export function compileKeymaps(
     prompt: compileKeymap([...layer("prompt"), ...layer("normal")]),
     insert: compileKeymap(layer("insert")),
     line: compileKeymap(layer("line")),
+    picker: compileKeymap(layer("picker")),
+    pickerList: compileKeymap([...layer("pickerList"), ...layer("picker")]),
+    confirm: compileKeymap(layer("confirm")),
   };
 }
 
