@@ -1,0 +1,29 @@
+{
+  "name": "t3tui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Terminal UI client for the T3 Code server",
+  "type": "module",
+  "workspaces": [
+    "vendor/contracts"
+  ],
+  "scripts": {
+    "dev": "bun run src/main.tsx",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "probe": "bun run src/probe.ts"
+  },
+  "dependencies": {
+    "@opentui/core": "0.8.1",
+    "@opentui/solid": "0.8.1",
+    "@t3tools/contracts": "workspace:*",
+    "effect": "4.0.5",
+    "solid-js": "1.9.18"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.4",
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}

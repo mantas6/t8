@@ -1,0 +1,8 @@
+node_modules/
+dist/
+result
+result-*
+.direnv/
+
+# Vendored upstream sources are committed on purpose (overrides global ignores).
+!vendor/

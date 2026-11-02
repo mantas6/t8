@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "useDefineForClassFields": true,
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+
+    "paths": {
+      "@t3tools/contracts": ["./vendor/contracts/src/index.ts"],
+      "@t3tools/contracts/settings": ["./vendor/contracts/src/settings.ts"],
+      "@t3tools/contracts/relay": ["./vendor/contracts/src/relay.ts"]
+    }
+  },
+  "include": ["src", "vendor/contracts/src"]
+}
