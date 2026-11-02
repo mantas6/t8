@@ -31,6 +31,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { type Accessor, createSignal } from "solid-js";
 import {
   archiveThread,
+  type Capability,
   cancelQueuedRun,
   createThread,
   type DeliveryIntent,
@@ -42,8 +43,14 @@ import {
   reorderQueuedRun,
   respondToRequest,
   sendMessage,
+  setAutoSettle,
   setModelSelection,
   setRuntimeMode,
+  settleThread,
+  snoozeThread,
+  supportsCapability,
+  unsettleThread,
+  unsnoozeThread,
 } from "../commands.ts";
 import { loadProfileConfig, type ResolvedConfig } from "../config.ts";
 import {
@@ -205,6 +212,13 @@ export interface Backend {
   setModel(threadId: ThreadId, modelSelection: ModelSelection): Promise<void>;
   setRuntimeMode(threadId: ThreadId, runtimeMode: RuntimeMode): Promise<void>;
   archive(threadId: ThreadId): Promise<void>;
+  /** Whether the connected server advertises a capability (false when it does not say). */
+  supports(capability: Capability): Promise<boolean>;
+  settle(threadId: ThreadId): Promise<void>;
+  unsettle(threadId: ThreadId): Promise<void>;
+  snooze(threadId: ThreadId, until: Date): Promise<void>;
+  unsnooze(threadId: ThreadId): Promise<void>;
+  setAutoSettle(threadId: ThreadId, enabled: boolean): Promise<void>;
   /** Archived threads, fetched on demand (`getArchivedShellSnapshot`). */
   archivedThreads(): Promise<ReadonlyArray<ThreadSummary>>;
   cancelQueued(threadId: ThreadId, runId: RunId): Promise<void>;
@@ -319,6 +333,22 @@ export async function makeBackend(
     },
     archive: async (threadId) => {
       await run(archiveThread(threadId));
+    },
+    supports: (capability) => run(supportsCapability(capability)),
+    settle: async (threadId) => {
+      await run(settleThread(threadId));
+    },
+    unsettle: async (threadId) => {
+      await run(unsettleThread(threadId));
+    },
+    snooze: async (threadId, until) => {
+      await run(snoozeThread(threadId, until));
+    },
+    unsnooze: async (threadId) => {
+      await run(unsnoozeThread(threadId));
+    },
+    setAutoSettle: async (threadId, enabled) => {
+      await run(setAutoSettle(threadId, enabled));
     },
     archivedThreads: async () => {
       const threads = await run(getArchivedThreads());

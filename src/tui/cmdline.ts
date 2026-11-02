@@ -31,6 +31,13 @@ export type Command =
   | { readonly type: "queue" }
   | { readonly type: "help" }
   | { readonly type: "archive" }
+  /** Settle / un-settle / wake a thread: the open one (null), or one by picker number or title. */
+  | { readonly type: "settle"; readonly target: number | string | null }
+  | { readonly type: "unsettle"; readonly target: number | string | null }
+  | { readonly type: "unsnooze"; readonly target: number | string | null }
+  /** Snooze the open thread; null `when` opens the preset picker. Parsed by `when.ts`. */
+  | { readonly type: "snooze"; readonly when: string | null }
+  | { readonly type: "autoSettle"; readonly enabled: boolean }
   | { readonly type: "reconnect" }
   /** Pair with a server by link; null asks for the link. */
   | { readonly type: "connect"; readonly link: string | null }
@@ -48,6 +55,12 @@ interface CommandSpec {
   readonly usage: string;
   readonly description: string;
   readonly parse: (arg: string, name: string) => Command;
+}
+
+/** A thread argument: a picker number, a title, or none (the open thread). */
+function threadTarget(arg: string): number | string | null {
+  if (arg === "") return null;
+  return /^[0-9]+$/.test(arg) ? Number.parseInt(arg, 10) : arg;
 }
 
 export const COMMAND_SPECS: ReadonlyArray<CommandSpec> = [
@@ -132,6 +145,46 @@ export const COMMAND_SPECS: ReadonlyArray<CommandSpec> = [
     usage: ":archive",
     description: "archive the open thread (asks first)",
     parse: () => ({ type: "archive" }),
+  },
+  {
+    names: ["settle"],
+    arg: "index",
+    usage: ":settle [n|title]",
+    description: "settle the open thread (or thread n); asks first while a run is active",
+    parse: (arg) => ({ type: "settle", target: threadTarget(arg) }),
+  },
+  {
+    names: ["unsettle"],
+    arg: "index",
+    usage: ":unsettle [n|title]",
+    description: "un-settle the open thread (or thread n): back to the active list",
+    parse: (arg) => ({ type: "unsettle", target: threadTarget(arg) }),
+  },
+  {
+    names: ["snooze"],
+    arg: "text",
+    usage: ":snooze [when]",
+    description:
+      "snooze the open thread: 30m 2h 3d 1w, 18:00, tomorrow, mon..sun, ISO; none: presets",
+    parse: (arg) => ({ type: "snooze", when: arg === "" ? null : arg }),
+  },
+  {
+    names: ["unsnooze", "wake"],
+    arg: "index",
+    usage: ":unsnooze [n|title]",
+    description: "wake the open thread (or thread n) from its snooze",
+    parse: (arg) => ({ type: "unsnooze", target: threadTarget(arg) }),
+  },
+  {
+    names: ["autosettle"],
+    arg: "text",
+    usage: ":autosettle on|off",
+    description: "let the server settle the open thread on its own, or not",
+    parse: (arg) => {
+      const value = arg.toLowerCase();
+      if (value === "on" || value === "off") return { type: "autoSettle", enabled: value === "on" };
+      return { type: "usage", message: "usage: :autosettle on|off" };
+    },
   },
   {
     names: ["approve", "a"],

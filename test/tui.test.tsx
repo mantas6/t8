@@ -94,6 +94,12 @@ function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) 
     models: [] as string[],
     modes: [] as string[],
     archived: [] as string[],
+    settled: [] as string[],
+    unsettled: [] as string[],
+    snoozed: [] as Array<{ threadId: string; until: Date }>,
+    unsnoozed: [] as string[],
+    autoSettle: [] as Array<{ threadId: string; enabled: boolean }>,
+    interrupted: [] as string[],
     reconnects: 0,
     switched: [] as string[],
     links: [] as string[],
@@ -102,6 +108,12 @@ function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) 
   };
   /** How many of the next sends / responses fail. */
   const failures = { send: 0, respond: 0 };
+  /** Capabilities the fake server advertises. */
+  const capabilities: Record<string, boolean> = {
+    threadSettlement: true,
+    threadSnooze: true,
+    threadAutoSettleOptOut: true,
+  };
   const [server, setServer] = createSignal<ServerView>({
     profile: "home",
     label: "home",
@@ -156,8 +168,9 @@ function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) 
       }
       calls.sent.push({ text, intent });
     },
-    interrupt: async () => {
+    interrupt: async (threadId) => {
       calls.interrupts += 1;
+      calls.interrupted.push(threadId);
     },
     respond: async (_threadId, requestId, response) => {
       calls.responses.push({ requestId, response });
@@ -181,6 +194,22 @@ function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) 
     archive: async (threadId) => {
       calls.archived.push(threadId);
     },
+    supports: async (capability) => capabilities[capability] === true,
+    settle: async (threadId) => {
+      calls.settled.push(threadId);
+    },
+    unsettle: async (threadId) => {
+      calls.unsettled.push(threadId);
+    },
+    snooze: async (threadId, until) => {
+      calls.snoozed.push({ threadId, until });
+    },
+    unsnooze: async (threadId) => {
+      calls.unsnoozed.push(threadId);
+    },
+    setAutoSettle: async (threadId, enabled) => {
+      calls.autoSettle.push({ threadId, enabled });
+    },
     archivedThreads: async () => [],
     cancelQueued: async () => {},
     reorderQueued: async () => {},
@@ -193,7 +222,7 @@ function fakeBackend(extraThreads: ReadonlyArray<Record<string, unknown>> = []) 
     shell.dispose();
     thread.dispose();
   };
-  return { backend, calls, failures, dispose };
+  return { backend, calls, failures, capabilities, dispose };
 }
 
 let cleanup: Array<() => unknown> = [];
@@ -446,6 +475,156 @@ describe("App", () => {
     app.mockInput.pressKey("y");
     await app.frame();
     expect(app.calls.archived).toEqual(["thread-build"]);
+  });
+
+  test("picker ds settles (asking first while a run is active) and un-settles", async () => {
+    const app = await mount(null);
+    await app.frame();
+    await command(app, "t");
+    expect(await app.frame()).toContain("ds settle · dz snooze");
+    // Idle: settled at once.
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("s");
+    expect(await app.frame()).toContain('settled "t8 smoke test"');
+    expect(app.calls.settled).toEqual([THREAD_ID]);
+
+    // Running: asks, stops the run, waits for it to end, then settles.
+    app.mockInput.pressKey("j");
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("s");
+    expect(await app.frame()).toContain('a run is active in "Fix the build": stop it and settle?');
+    app.mockInput.pressKey("n");
+    await app.frame();
+    expect(app.calls.interrupted).toEqual([]);
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("s");
+    await app.frame();
+    app.mockInput.pressKey("y");
+    await app.frame();
+    expect(app.calls.interrupted).toEqual(["thread-build"]);
+    expect(app.calls.settled).toEqual([THREAD_ID]);
+    const stopped = SHELL_THREADS.map((entry) =>
+      entry.id === "thread-build" ? { ...entry, status: "interrupted" } : entry,
+    );
+    app.backend.shell.apply(shellSnapshot(SHELL_PROJECTS, stopped));
+    await sleep(250);
+    expect(await app.frame()).toContain('settled "Fix the build"');
+    expect(app.calls.settled).toEqual([THREAD_ID, "thread-build"]);
+
+    // A settled row (shown with C-s) is un-settled instead.
+    app.mockInput.pressKey("s", { ctrl: true });
+    await app.frame();
+    for (let i = 0; i < 4; i++) app.mockInput.pressKey("j");
+    expect(await app.frame()).toMatch(/▌?\s*5 · Old copy/);
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("s");
+    expect(await app.frame()).toContain('un-settled "Old copy"');
+    expect(app.calls.unsettled).toEqual(["thread-old-copy"]);
+    expect(app.calls.archived).toEqual([]);
+  });
+
+  test("picker dz opens the snooze presets (or wakes a snoozed thread)", async () => {
+    const app = await mount(null);
+    await app.frame();
+    await command(app, "t");
+    app.mockInput.pressKey("j");
+    app.mockInput.pressKey("j");
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("z");
+    const presets = await app.frame();
+    expect(presets).toContain('Snooze "Landing page copy" until');
+    expect(presets).toContain("in 1 hour");
+    expect(presets).toContain("tomorrow morning");
+    expect(presets).toContain("custom…");
+    expect(presets).toContain("Enter snooze");
+    const before = Date.now();
+    app.mockInput.pressEnter();
+    const after = await app.frame();
+    expect(app.calls.snoozed.map((entry) => entry.threadId)).toEqual(["thread-landing"]);
+    const until = app.calls.snoozed[0]?.until.getTime() ?? 0;
+    expect(until - before).toBeGreaterThan(3_590_000);
+    expect(until - before).toBeLessThan(3_610_000);
+    expect(after).toContain('snoozed "Landing page copy" until');
+    // Back in the thread picker.
+    expect(after).toContain("Enter open");
+
+    // Esc in the presets goes back to the thread picker too.
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("z");
+    expect(await app.frame()).toContain("in 3 hours");
+    app.mockInput.pressEscape();
+    const back = await app.frame();
+    expect(back).not.toContain("in 3 hours");
+    expect(back).toContain("Enter open");
+
+    // A snoozed row is woken instead.
+    app.mockInput.pressKey("s", { ctrl: true });
+    await app.frame();
+    for (let i = 0; i < 3; i++) app.mockInput.pressKey("j");
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("z");
+    expect(await app.frame()).toContain('woke "Revisit pricing"');
+    expect(app.calls.unsnoozed).toEqual(["thread-later"]);
+
+    // Other keys after d are still typing.
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey("x");
+    expect(await app.frame()).toContain("> dx");
+  });
+
+  test(":settle, :snooze, :unsnooze, :unsettle and :autosettle on the open thread", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    expect(await command(app, "settle")).toContain('settled "t8 smoke test"');
+    expect(app.calls.settled).toEqual([THREAD_ID]);
+    expect(await command(app, "unsettle")).toContain('un-settled "t8 smoke test"');
+    expect(app.calls.unsettled).toEqual([THREAD_ID]);
+
+    const before = Date.now();
+    expect(await command(app, "snooze 2h")).toMatch(/snoozed "t8 smoke test" until /);
+    const until = app.calls.snoozed[0]?.until.getTime() ?? 0;
+    expect(Math.abs(until - before - 2 * 3_600_000)).toBeLessThan(10_000);
+    expect(await command(app, "snooze soonish")).toContain('cannot read "soonish"');
+    expect(app.calls.snoozed).toHaveLength(1);
+
+    // No time: the presets; custom asks for one.
+    expect(await command(app, "snooze")).toContain("tomorrow morning");
+    // "custom…" is last (the cursor stops there).
+    for (let i = 0; i < 6; i++) app.mockInput.pressKey("j");
+    app.mockInput.pressEnter();
+    expect(await app.frame()).toContain('snooze "t8 smoke test" until:');
+    await app.mockInput.typeText("tomorrow");
+    app.mockInput.pressEnter();
+    expect(await app.frame()).toContain('snoozed "t8 smoke test" until tomorrow 09:00');
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(9, 0, 0, 0);
+    expect(app.calls.snoozed[1]?.until).toEqual(tomorrow);
+
+    expect(await command(app, "unsnooze")).toContain('woke "t8 smoke test"');
+    expect(app.calls.unsnoozed).toEqual([THREAD_ID]);
+    expect(await command(app, "autosettle off")).toContain('auto-settle off for "t8 smoke test"');
+    expect(app.calls.autoSettle).toEqual([{ threadId: THREAD_ID, enabled: false }]);
+
+    // A thread named by picker number or title (settled ones too).
+    expect(await command(app, "settle 2")).toContain('a run is active in "Fix the build"');
+    app.mockInput.pressKey("n");
+    await app.frame();
+    await command(app, "settle 3");
+    expect(app.calls.settled.at(-1)).toBe("thread-landing");
+    await command(app, "unsettle old copy");
+    expect(app.calls.unsettled.at(-1)).toBe("thread-old-copy");
+  });
+
+  test("settle and snooze: no thread, unsupported server, pending request", async () => {
+    const app = await mount(null);
+    await app.frame();
+    expect(await command(app, "settle")).toContain("no thread open");
+    expect(await command(app, "snooze 1h")).toContain("no thread open");
+    app.backend.openThread(THREAD_ID);
+    app.capabilities.threadSnooze = false;
+    expect(await command(app, "snooze")).toContain("server does not support snoozing threads");
+    expect(await app.frame()).not.toContain("tomorrow morning");
   });
 
   test("subagent threads: hidden in :t, C-x shows them indented, requests bubble up", async () => {

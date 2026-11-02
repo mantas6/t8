@@ -52,6 +52,35 @@ describe("parseCommandLine", () => {
     expect(parseCommandLine("bp")).toEqual({ type: "threadPrev" });
   });
 
+  test("settle, snooze and auto-settle", () => {
+    expect(parseCommandLine("settle")).toEqual({ type: "settle", target: null });
+    expect(parseCommandLine("settle 4")).toEqual({ type: "settle", target: 4 });
+    expect(parseCommandLine("settle old copy")).toEqual({ type: "settle", target: "old copy" });
+    expect(parseCommandLine("unsettle")).toEqual({ type: "unsettle", target: null });
+    expect(parseCommandLine("unsettle 2")).toEqual({ type: "unsettle", target: 2 });
+    expect(parseCommandLine("unsnooze")).toEqual({ type: "unsnooze", target: null });
+    expect(parseCommandLine("wake pricing")).toEqual({ type: "unsnooze", target: "pricing" });
+    expect(parseCommandLine("snooze")).toEqual({ type: "snooze", when: null });
+    expect(parseCommandLine("snooze 2h")).toEqual({ type: "snooze", when: "2h" });
+    expect(parseCommandLine(":snooze  tomorrow 14:00 ")).toEqual({
+      type: "snooze",
+      when: "tomorrow 14:00",
+    });
+    expect(parseCommandLine("autosettle on")).toEqual({ type: "autoSettle", enabled: true });
+    expect(parseCommandLine("autosettle OFF")).toEqual({ type: "autoSettle", enabled: false });
+    expect(parseCommandLine("autosettle")).toEqual({
+      type: "usage",
+      message: "usage: :autosettle on|off",
+    });
+    expect(parseCommandLine("autosettle maybe").type).toBe("usage");
+  });
+
+  test(":settle completes thread titles", () => {
+    const set = completionCandidates("settle Old", { threads: ["Old copy", "New"], projects: [] });
+    expect(set.candidates).toEqual(["Old copy"]);
+    expect(COMMAND_NAMES).toContain("unsnooze");
+  });
+
   test(":b takes an index or a title", () => {
     expect(parseCommandLine("b 3")).toEqual({ type: "thread", target: 3 });
     expect(parseCommandLine("thread 12")).toEqual({ type: "thread", target: 12 });

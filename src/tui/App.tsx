@@ -1,7 +1,7 @@
 /**
  * The full-screen TUI: status line, transcript, and the input (or the
  * pending request prompt) with a hint line, plus the picker overlays (`:t`,
- * `:p`, `:m`, `:mode`, `:queue`, `:servers`) drawn over the transcript. All keys go
+ * `:p`, `:m`, `:mode`, `:queue`, `:servers`, `:snooze`) drawn over the transcript. All keys go
  * through one global handler that picks the keymap layer for the current
  * view (`keymap.ts`), runs it through the prefix/count state machine
  * (`keys.ts`) and dispatches actions.
@@ -41,7 +41,12 @@ import { createStore, reconcile, unwrap } from "solid-js/store";
 import { type DeliveryIntent, newCommandId, newMessageId } from "../commands.ts";
 import type { ProfileEntry } from "../connect.ts";
 import { canOperate } from "../pairing.ts";
-import { resolveRowThreadId, selectProjectGroups, selectThreadStatus } from "../state/selectors.ts";
+import {
+  isEffectivelySnoozed,
+  resolveRowThreadId,
+  selectProjectGroups,
+  selectThreadStatus,
+} from "../state/selectors.ts";
 import type {
   DisplayItem,
   PendingApproval,
@@ -79,6 +84,7 @@ import {
   type UserInputProgress,
 } from "./components/RequestPrompt.tsx";
 import { buildServerRows, ServerPicker } from "./components/ServerPicker.tsx";
+import { buildSnoozeRows, type SnoozeChoice, SnoozePicker } from "./components/SnoozePicker.tsx";
 import { type StatusInfo, StatusLine } from "./components/StatusLine.tsx";
 import {
   buildThreadRows,
@@ -129,6 +135,7 @@ import {
   type PickerView,
   type View,
 } from "./view.ts";
+import { formatWake, parseWhen, snoozePresets, WHEN_USAGE } from "./when.ts";
 
 export const NO_THREAD_PLACEHOLDER = "No thread open. Press : then t to pick a thread";
 
@@ -139,6 +146,22 @@ const DOUBLE_CTRL_C_MS = 1_000;
  * this long, so keys typed for something else do not answer it unseen.
  */
 export const REQUEST_ARM_MS = 500;
+
+/** How long settling a thread with an active run waits for the run to stop. */
+export const SETTLE_STOP_TIMEOUT_MS = 20_000;
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/** A thread a command acts on. */
+interface ThreadRef {
+  readonly id: ThreadId;
+  readonly title: string;
+}
 
 export interface AppProps {
   readonly backend: Backend;
@@ -204,12 +227,13 @@ const FILTERED_PICKERS: ReadonlySet<View> = new Set<View>(["threads", "projects"
 
 const PICKER_HINTS: Readonly<Record<PickerView, string>> = {
   threads:
-    "type to filter · ↑↓ (j k) move · Enter open · dd archive · C-g flat/grouped · C-s settled · C-x subagents · C-a archived · Esc clear/close",
+    "type to filter · ↑↓ (j k) move · Enter open · dd archive · ds settle · dz snooze · C-g flat · C-s settled · C-x subagents · C-a archived · Esc clear/close",
   projects: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   models: "type to filter · ↑↓ C-n C-p (j k) move · Enter choose · Esc clear/close",
   modes: "j k move · Enter set the mode · Esc close",
   queue: "j k move · dd cancel · J K reorder · Esc close",
   servers: "j k move · Enter switch to it · Esc close",
+  snooze: "j k move · Enter snooze · Esc close",
 };
 
 /** A text prompt in the bottom line (the `input` view), e.g. a new thread's title. */
@@ -945,6 +969,15 @@ export function App(props: AppProps) {
   const [showSettled, setShowSettled] = createSignal(false);
   const [showSubagents, setShowSubagents] = createSignal(false);
   const [threadLayout, setThreadLayout] = createSignal<ThreadLayout>("grouped");
+  /**
+   * The thread the snooze picker is for, the time its presets were computed
+   * at, and the thread picker narrowing to go back to (null: the transcript).
+   */
+  const [snoozing, setSnoozing] = createSignal<{
+    readonly target: ThreadRef;
+    readonly now: Date;
+    readonly back: { readonly projectId: ProjectId | null } | null;
+  } | null>(null);
   const listOptions = (): ThreadListOptions => ({
     layout: threadLayout(),
     showSettled: showSettled(),
@@ -1067,6 +1100,11 @@ export function App(props: AppProps) {
       }
       case "queue":
         return { rows: buildQueueRows(thread.queue(), pickerWidth()), initial: 0 };
+      case "snooze": {
+        const current = snoozing();
+        if (current === null) return { rows: [], initial: 0 };
+        return { rows: buildSnoozeRows(snoozePresets(current.now), current.now), initial: 0 };
+      }
       case "servers": {
         const current = backend.server().profile;
         const rows = buildServerRows(serverEntries() ?? [], {
@@ -1128,6 +1166,7 @@ export function App(props: AppProps) {
     ui.setView("transcript");
     setPickerFilter("");
     setDraft(null);
+    setSnoozing(null);
   };
 
   const onFilter = (value: string) => {
@@ -1336,6 +1375,28 @@ export function App(props: AppProps) {
       case "queue":
         closePicker();
         return;
+      case "snooze": {
+        const choice = row.value as SnoozeChoice;
+        const target = snoozing()?.target;
+        if (target === undefined) {
+          closePicker();
+          return;
+        }
+        if (choice.kind === "preset") {
+          leaveSnoozePicker();
+          snoozeUntil(target, choice.until);
+          return;
+        }
+        closePicker();
+        askText({
+          prefix: `snooze "${oneLine(target.title, 40)}" until: `,
+          hint: `${WHEN_USAGE} · Enter snooze · Esc cancel`,
+          onSubmit: (text) => {
+            if (text.trim() !== "") snoozeWhen(target, text);
+          },
+        });
+        return;
+      }
       case "servers": {
         const entry = row.value as ProfileEntry;
         closePicker();
@@ -1387,6 +1448,187 @@ export function App(props: AppProps) {
     typeIntoFilter("dd");
   };
 
+  // Settle and snooze -----------------------------------------------------
+
+  /** A failed command: an unsupported server says so plainly, anything else as an error. */
+  const commandFailed = (what: string) => (error: unknown) => {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      (error as { _tag?: unknown })._tag === "UnsupportedServerError"
+    ) {
+      notice((error as { message: string }).message, "warn", 6_000);
+      return;
+    }
+    notice(`could not ${what}: ${describeError(error)}`, "error", 6_000);
+  };
+
+  const threadRef = (id: ThreadId): ThreadRef => ({
+    id,
+    title: shell.thread(id)?.title ?? (id === threadId() ? info().title : null) ?? id,
+  });
+
+  const runIsActive = (id: ThreadId): boolean => {
+    if (id === threadId() && thread.activeRun() !== null) return true;
+    const current = shell.thread(id);
+    return current !== undefined && (current.liveRun || ACTIVE_RUN_STATUSES.has(current.status));
+  };
+
+  const waitsForUser = (id: ThreadId): boolean => {
+    if (id === threadId() && thread.pendingRequests().length > 0) return true;
+    return (shell.thread(id)?.pendingRequest ?? null) !== null;
+  };
+
+  // Polls for the run to stop after an interrupt (the shell stream reports it).
+  const waiters = new Set<ReturnType<typeof setInterval>>();
+  onCleanup(() => {
+    for (const timer of waiters) clearInterval(timer);
+  });
+  const waitUntil = (done: () => boolean, timeoutMs: number) =>
+    new Promise<boolean>((resolve) => {
+      if (done()) {
+        resolve(true);
+        return;
+      }
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const ok = done();
+        if (!ok && Date.now() - started < timeoutMs) return;
+        clearInterval(timer);
+        waiters.delete(timer);
+        resolve(ok);
+      }, 100);
+      waiters.add(timer);
+    });
+
+  /** Settles a thread; with a run active, asks to stop it first (the server refuses otherwise). */
+  const settle = (target: ThreadRef) => {
+    if (waitsForUser(target.id)) {
+      notice("this thread is waiting on you: answer the pending request before settling", "warn");
+      return;
+    }
+    const run = () =>
+      backend
+        .settle(target.id)
+        .then(() => notice(`settled "${target.title}"`), commandFailed("settle"));
+    if (!runIsActive(target.id)) {
+      void run();
+      return;
+    }
+    ask(`a run is active in "${target.title}": stop it and settle?`, () => {
+      notice("stopping the run…");
+      backend
+        .interrupt(target.id)
+        .then(() => waitUntil(() => !runIsActive(target.id), SETTLE_STOP_TIMEOUT_MS))
+        .then((stopped) => {
+          if (stopped) return run();
+          notice("the run has not stopped yet: :settle again once it has", "warn", 6_000);
+        }, commandFailed("stop the run"));
+    });
+  };
+
+  const unsettle = (target: ThreadRef) => {
+    backend
+      .unsettle(target.id)
+      .then(
+        () => notice(`un-settled "${target.title}": back in the active list`),
+        commandFailed("un-settle"),
+      );
+  };
+
+  const unsnooze = (target: ThreadRef) => {
+    backend
+      .unsnooze(target.id)
+      .then(() => notice(`woke "${target.title}"`), commandFailed("wake the thread"));
+  };
+
+  const snoozeUntil = (target: ThreadRef, until: Date) => {
+    backend.snooze(target.id, until).then(() => {
+      // The coarse clock can be 30s behind, which would make "in 1h" read "2h" left.
+      setClock(Date.now());
+      notice(`snoozed "${target.title}" until ${formatWake(until, new Date())}`);
+    }, commandFailed("snooze"));
+  };
+
+  /** Snoozes until a typed `<when>` (`when.ts`). */
+  const snoozeWhen = (target: ThreadRef, when: string) => {
+    if (waitsForUser(target.id)) {
+      notice("this thread is waiting on you: answer the pending request before snoozing", "warn");
+      return;
+    }
+    const parsed = parseWhen(when, new Date());
+    if (!parsed.ok) {
+      notice(parsed.error, "error", 8_000);
+      return;
+    }
+    snoozeUntil(target, parsed.date);
+  };
+
+  /** The preset picker; `back` returns to the thread picker afterwards. */
+  const openSnoozePicker = (
+    target: ThreadRef,
+    back: { readonly projectId: ProjectId | null } | null,
+  ) => {
+    if (waitsForUser(target.id)) {
+      notice("this thread is waiting on you: answer the pending request before snoozing", "warn");
+      return;
+    }
+    backend.supports("threadSnooze").then((supported) => {
+      if (!supported) {
+        notice("server does not support snoozing threads", "warn", 6_000);
+        return;
+      }
+      setSnoozing({ target, now: new Date(), back });
+      openPicker("snooze");
+    }, commandFailed("snooze"));
+  };
+
+  /** Closes the snooze picker: back to the thread picker it came from, else the transcript. */
+  const leaveSnoozePicker = () => {
+    const back = snoozing()?.back ?? null;
+    if (back === null) {
+      closePicker();
+      return;
+    }
+    setSnoozing(null);
+    openThreadPicker("", back.projectId);
+  };
+
+  const pickerThread = (verb: string): ThreadSummary | null => {
+    const row = pickerSelected();
+    if (row?.kind !== "item") return null;
+    const target = row.value as ThreadSummary;
+    if (target.archived) {
+      notice(`archived threads cannot be ${verb}`, "warn");
+      return null;
+    }
+    return target;
+  };
+
+  /** `ds`: settle the thread under the cursor, or un-settle it. */
+  const pickerSettle = () => {
+    if (ui.view() !== "threads") {
+      typeIntoFilter("ds");
+      return;
+    }
+    const target = pickerThread("settled");
+    if (target === null) return;
+    if (target.settled) unsettle(target);
+    else settle(target);
+  };
+
+  /** `dz`: snooze the thread under the cursor (presets), or wake it. */
+  const pickerSnooze = () => {
+    if (ui.view() !== "threads") {
+      typeIntoFilter("dz");
+      return;
+    }
+    const target = pickerThread("snoozed");
+    if (target === null) return;
+    if (isEffectivelySnoozed(target, Date.now())) unsnooze(target);
+    else openSnoozePicker(target, { projectId: threadProject() });
+  };
+
   const pickerMove = (delta: -1 | 1, key: string) => {
     if (ui.view() !== "queue") {
       typeIntoFilter(key);
@@ -1411,7 +1653,8 @@ export function App(props: AppProps) {
       onFilter("");
       return;
     }
-    closePicker();
+    if (ui.view() === "snooze") leaveSnoozePicker();
+    else closePicker();
   };
 
   // Servers ----------------------------------------------------------------
@@ -1476,26 +1719,48 @@ export function App(props: AppProps) {
 
   // Commands ---------------------------------------------------------------
 
-  const jumpToThread = (target: number | string) => {
+  /**
+   * A thread by picker number (`:b <n>`) or title; with `anyActive`, titles
+   * also match threads the picker hides (settled, snoozed). Null, with a
+   * notice, when nothing matches.
+   */
+  const findThread = (target: number | string, anyActive = false): ThreadSummary | null => {
     const list = threadIndex(shell.groups(), listOptions());
-    let found: ThreadSummary | undefined;
     if (typeof target === "number") {
-      found = list[target - 1];
-      if (found === undefined) {
-        notice(`no thread ${target} (1-${list.length})`, "error");
-        return;
-      }
-    } else {
-      const lowered = target.toLowerCase();
-      found =
-        list.find((candidate) => candidate.title.toLowerCase() === lowered) ??
-        fuzzyFilter(list, target, (candidate) => candidate.title)[0]?.item;
-      if (found === undefined) {
-        notice(`no thread matches "${target}"`, "error");
-        return;
-      }
+      const found = list[target - 1];
+      if (found === undefined) notice(`no thread ${target} (1-${list.length})`, "error");
+      return found ?? null;
     }
-    if (found.id !== threadId()) openThread(found.id);
+    const byTitle = (pool: ReadonlyArray<ThreadSummary>) => {
+      const lowered = target.toLowerCase();
+      return (
+        pool.find((candidate) => candidate.title.toLowerCase() === lowered) ??
+        fuzzyFilter(pool, target, (candidate) => candidate.title)[0]?.item
+      );
+    };
+    const found =
+      byTitle(list) ??
+      (anyActive
+        ? byTitle(Object.values(shell.state.threads).filter((candidate) => !candidate.archived))
+        : undefined);
+    if (found === undefined) notice(`no thread matches "${target}"`, "error");
+    return found ?? null;
+  };
+
+  const jumpToThread = (target: number | string) => {
+    const found = findThread(target);
+    if (found !== null && found.id !== threadId()) openThread(found.id);
+  };
+
+  /** What a settle / unsnooze command acts on: the open thread, or the one named. */
+  const commandTarget = (target: number | string | null): ThreadRef | null => {
+    if (target === null) {
+      const id = threadId();
+      if (id === null) notice("no thread open", "warn");
+      return id === null ? null : threadRef(id);
+    }
+    const found = findThread(target, true);
+    return found === null ? null : { id: found.id, title: found.title };
   };
 
   const narrowToProject = (name: string) => {
@@ -1604,6 +1869,41 @@ export function App(props: AppProps) {
           return;
         }
         archiveThread({ id, title: info().title ?? id });
+        return;
+      }
+      case "settle":
+      case "unsettle":
+      case "unsnooze": {
+        const target = commandTarget(command.target);
+        if (target === null) return;
+        if (command.type === "settle") settle(target);
+        else if (command.type === "unsettle") unsettle(target);
+        else unsnooze(target);
+        return;
+      }
+      case "snooze": {
+        const id = threadId();
+        if (id === null) {
+          notice("no thread open", "warn");
+          return;
+        }
+        if (command.when === null) openSnoozePicker(threadRef(id), null);
+        else snoozeWhen(threadRef(id), command.when);
+        return;
+      }
+      case "autoSettle": {
+        const id = threadId();
+        if (id === null) {
+          notice("no thread open", "warn");
+          return;
+        }
+        const target = threadRef(id);
+        backend
+          .setAutoSettle(id, command.enabled)
+          .then(
+            () => notice(`auto-settle ${command.enabled ? "on" : "off"} for "${target.title}"`),
+            commandFailed("change auto-settle"),
+          );
         return;
       }
       case "reconnect":
@@ -1793,6 +2093,10 @@ export function App(props: AppProps) {
         return closePicker();
       case "picker.delete":
         return pickerDelete();
+      case "picker.settle":
+        return pickerSettle();
+      case "picker.snooze":
+        return pickerSnooze();
       case "picker.moveDown":
         return pickerMove(1, "J");
       case "picker.moveUp":
@@ -2112,6 +2416,15 @@ export function App(props: AppProps) {
             rows={() => pickerList().rows}
             cursorRow={pickerCursorRow}
             loading={() => serverEntries() === null}
+            width={() => dimensions().width}
+            height={() => dimensions().height}
+          />
+        </Match>
+        <Match when={ui.view() === "snooze"}>
+          <SnoozePicker
+            title={() => `Snooze "${oneLine(snoozing()?.target.title ?? "", 40)}" until`}
+            rows={() => pickerList().rows}
+            cursorRow={pickerCursorRow}
             width={() => dimensions().width}
             height={() => dimensions().height}
           />

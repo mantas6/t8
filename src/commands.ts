@@ -51,22 +51,41 @@ export const newCommandId = (): CommandId => CommandId.make(crypto.randomUUID())
 export const newMessageId = (): MessageId => MessageId.make(crypto.randomUUID());
 export const newThreadId = (): ThreadId => ThreadId.make(crypto.randomUUID());
 
-type Capability = keyof ExecutionEnvironmentDescriptor["capabilities"];
+export type Capability = keyof ExecutionEnvironmentDescriptor["capabilities"];
 
 function hasCapability(session: Session, capability: Capability): boolean {
   return session.environment.capabilities[capability] === true;
 }
 
-function requireCapability(session: Session, capability: Capability) {
+/** Fails with `UnsupportedServerError` unless the server advertises `capability`; `what` names it for people. */
+function requireCapability(session: Session, capability: Capability, what: string = capability) {
   return hasCapability(session, capability)
     ? Effect.void
     : Effect.fail(
         new UnsupportedServerError({
           capability,
-          message: `server ${session.environment.serverVersion} does not support ${capability}`,
+          message: `server ${session.environment.serverVersion} does not support ${what}`,
         }),
       );
 }
+
+/** Whether the connected server advertises a capability. Waits for a connection. */
+export const supportsCapability = Effect.fn("commands.supportsCapability")(function* (
+  capability: Capability,
+) {
+  return hasCapability(yield* (yield* Connection).session, capability);
+});
+
+/** Dispatches a command after checking the server advertises `capability`. */
+const dispatchGated = Effect.fn("commands.dispatchGated")(function* (
+  capability: Capability,
+  what: string,
+  command: OrchestrationV2Command,
+) {
+  const session = yield* (yield* Connection).session;
+  yield* requireCapability(session, capability, what);
+  return yield* session.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](command);
+});
 
 /** Dispatches a raw command on the current session. Waits for a connection. */
 export const dispatch = Effect.fn("commands.dispatch")(function* (command: OrchestrationV2Command) {
@@ -265,6 +284,64 @@ export const setRuntimeMode = Effect.fn("commands.setRuntimeMode")(function* (
 
 export const archiveThread = Effect.fn("commands.archiveThread")(function* (threadId: ThreadId) {
   return yield* dispatch({ type: "thread.archive", commandId: newCommandId(), threadId });
+});
+
+/**
+ * Settles a thread: it leaves the active list until something new happens.
+ * The server refuses while a run is active, a request waits, or a message is
+ * queued. `settledAt` is left to the server, like upstream.
+ */
+export const settleThread = Effect.fn("commands.settleThread")(function* (threadId: ThreadId) {
+  return yield* dispatchGated("threadSettlement", "settling threads", {
+    type: "thread.settle",
+    commandId: newCommandId(),
+    threadId,
+  });
+});
+
+/** Un-settles a thread; `reason: "user"` pins it active, so auto-settle leaves it alone. */
+export const unsettleThread = Effect.fn("commands.unsettleThread")(function* (threadId: ThreadId) {
+  return yield* dispatchGated("threadSettlement", "settling threads", {
+    type: "thread.unsettle",
+    commandId: newCommandId(),
+    threadId,
+    reason: "user",
+  });
+});
+
+/** Hides a thread until `until` (or until it asks for the user or fails). */
+export const snoozeThread = Effect.fn("commands.snoozeThread")(function* (
+  threadId: ThreadId,
+  until: Date,
+) {
+  return yield* dispatchGated("threadSnooze", "snoozing threads", {
+    type: "thread.snooze",
+    commandId: newCommandId(),
+    threadId,
+    snoozedUntil: until.toISOString(),
+  });
+});
+
+export const unsnoozeThread = Effect.fn("commands.unsnoozeThread")(function* (threadId: ThreadId) {
+  return yield* dispatchGated("threadSnooze", "snoozing threads", {
+    type: "thread.unsnooze",
+    commandId: newCommandId(),
+    threadId,
+    reason: "user",
+  });
+});
+
+/** Turns automatic settling on or off for one thread. */
+export const setAutoSettle = Effect.fn("commands.setAutoSettle")(function* (
+  threadId: ThreadId,
+  enabled: boolean,
+) {
+  return yield* dispatchGated("threadAutoSettleOptOut", "turning auto-settle off per thread", {
+    type: "thread.auto-settle.set",
+    commandId: newCommandId(),
+    threadId,
+    enabled,
+  });
 });
 
 /** Fetches one turn item in full, including output the stream withheld (`resultOmitted`). */

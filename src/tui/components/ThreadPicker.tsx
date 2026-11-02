@@ -462,7 +462,7 @@ export function buildThreadRows(
   return { rows, best, hiddenSettled, hiddenSubagents };
 }
 
-/** The dim line under the thread list: what is hidden or shown, and the keys for it. */
+/** The dim line under the thread list: what is hidden or shown, and the keys for it and for settling. */
 export function threadPickerFooter(state: {
   readonly layout: ThreadLayout;
   readonly showSettled: boolean;
@@ -485,6 +485,7 @@ export function threadPickerFooter(state: {
     parts.push(`${count} subagent${count === 1 ? "" : "s"} hidden (C-x)`);
   }
   if (state.showArchived) parts.push("archived shown (C-a)");
+  parts.push("ds settle · dz snooze");
   return parts.join(" · ");
 }
 

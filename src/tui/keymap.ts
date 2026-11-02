@@ -10,7 +10,7 @@
  * - `line`: the `:` command line, `/` search prompt or a text prompt has focus.
  * - `picker`: a picker overlay whose filter has text; typing goes to the filter.
  * - `pickerList`: a picker with an empty filter (or none): `picker` plus `j`/`k`
- *   and the list commands (`dd`, `J`/`K`).
+ *   and the list commands (`dd`, `ds`, `dz`, `J`/`K`).
  * - `confirm`: a y/n question in the bottom line.
  * - `help`: the `?` overlay while its filter has text or focus; typing goes to
  *   the filter.
@@ -82,6 +82,8 @@ export type ActionId =
   | "picker.cancel"
   | "picker.close"
   | "picker.delete"
+  | "picker.settle"
+  | "picker.snooze"
   | "picker.moveDown"
   | "picker.moveUp"
   | "picker.toggleArchived"
@@ -153,6 +155,8 @@ export const ACTION_DESCRIPTIONS: Readonly<Record<ActionId, string>> = {
   "picker.cancel": "clear the filter, then close",
   "picker.close": "close",
   "picker.delete": "archive the thread / cancel the queued message (asks first)",
+  "picker.settle": "thread picker: settle the thread (un-settle if settled)",
+  "picker.snooze": "thread picker: snooze the thread (presets; wake it if snoozed)",
   "picker.moveDown": "move the queued message down",
   "picker.moveUp": "move the queued message up",
   "picker.toggleArchived": "thread picker: show / hide archived threads",
@@ -263,6 +267,8 @@ export const DEFAULT_KEYMAPS: Readonly<Record<Layer, ReadonlyArray<KeyBinding>>>
     { keys: "j", action: "picker.down" },
     { keys: "k", action: "picker.up" },
     { keys: "dd", action: "picker.delete" },
+    { keys: "ds", action: "picker.settle" },
+    { keys: "dz", action: "picker.snooze" },
     { keys: "J", action: "picker.moveDown" },
     { keys: "K", action: "picker.moveUp" },
   ],

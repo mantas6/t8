@@ -170,6 +170,11 @@ this session. An unknown command says so in the status line.
 | `:bn` `:bp`             | next / previous thread in the project (like `gt` / `gT`)         |
 | `:queue`                | queued messages of the open thread                               |
 | `:archive`              | archive the open thread (asks first)                             |
+| `:settle [n\|title]`    | settle the open thread (or one by number or title)               |
+| `:unsettle [n\|title]`  | un-settle it: back in the active list, auto-settle stays off it  |
+| `:snooze [when]`        | snooze the open thread; no time: a picker of presets             |
+| `:unsnooze [n\|title]`  | wake a snoozed thread (`:wake` works too)                        |
+| `:autosettle on\|off`   | let the server settle the open thread on its own, or not         |
 | `:a` `:approve`         | approve the pending request                                      |
 | `:d` `:deny`            | deny the pending request                                         |
 | `:reconnect`            | reconnect now; after a fatal error, try again (token re-read)    |
@@ -191,6 +196,8 @@ Typing filters (fuzzy: `t3t` finds "t8"); the best match gets the cursor.
 | `Enter`                         | open / choose                                               |
 | `Esc`                           | clear the filter, then close (`Ctrl-c` closes at once)      |
 | `dd`                            | thread picker: archive; queue: cancel (both ask `y`/`n`)    |
+| `ds`                            | thread picker: settle the thread (un-settle a settled one)  |
+| `dz`                            | thread picker: snooze presets (wake a snoozed thread)       |
 | `J` `K`                         | queue: move the message down / up                           |
 | `Ctrl-a`                        | thread picker: show / hide archived threads                 |
 | `Ctrl-s`                        | thread picker: show / hide settled and snoozed threads      |
@@ -241,6 +248,26 @@ Settled and snoozed follow the T3 Code web app: a thread is settled when its
 `settledOverride` is `settled`, and snoozed while `snoozedUntil` is ahead and
 neither a pending request nor a failure since the snooze has woken it; snoozed
 wins over settled. The status line shows the same label for the open thread.
+
+`:settle`, `:snooze` and `ds` / `dz` in the thread picker change that state
+(when the server advertises `threadSettlement`, `threadSnooze` and, for
+`:autosettle`, `threadAutoSettleOptOut`; otherwise they say the server does not
+support it). The server will not settle a thread with a run going, so settling
+one asks `y`/`n` first, then stops the run and settles once it has ended; a
+thread waiting for an approval or an answer can be neither settled nor
+snoozed. `:snooze <when>` takes:
+
+| `<when>`                                     | Wakes                                        |
+| -------------------------------------------- | -------------------------------------------- |
+| `30m` `2h` `3d` `1w`, `1h30m`                | after that long                              |
+| `18:00`                                      | today at 18:00, or tomorrow if it has gone   |
+| `tomorrow`, `mon` .. `sun` (or `monday` ..)  | that day at 09:00 (a weekday is never today) |
+| `tomorrow 14:00`, `fri 17:30`, `today 18:00` | that day at that time                        |
+| `2026-11-20`, `2026-11-20T15:00`, `...Z`     | then (a date alone: 09:00; no zone: local)   |
+
+`:snooze` alone (and `dz`) offers the web app's presets: in 1 hour, in 3
+hours, this evening (until an hour before 18:00), tomorrow morning, next
+Monday, and custom (asks for a `<when>`).
 
 `:n` creates the thread with the project's default model, else the model
 picked last in this session, else the model of the project's newest thread,

@@ -30,7 +30,7 @@ export function helpSections(
     { title: "INSERT (message input)", rows: helpRows(keymaps.insert) },
     { title: "Command / search line", rows: helpRows(keymaps.line) },
     {
-      title: "Pickers (j k dd J K only while the filter is empty)",
+      title: "Pickers (j k dd ds dz J K only while the filter is empty)",
       rows: helpRows([...keymaps.picker, ...keymaps.pickerList]),
     },
     { title: "Confirm (y/n line)", rows: helpRows(keymaps.confirm) },
