@@ -34,6 +34,12 @@ export function threadIndex(groups: ReadonlyArray<ProjectGroup>): ReadonlyArray<
 }
 
 export interface ThreadRowsOptions {
+  /**
+   * The groups row numbers are counted in (what `:b <n>` uses), when the rows
+   * come from a different list, e.g. one that also holds archived threads.
+   * Defaults to the groups being listed.
+   */
+  readonly numbering?: ReadonlyArray<ProjectGroup>;
   readonly query: string;
   /** Only this project's threads. */
   readonly projectId: string | null;
@@ -57,7 +63,7 @@ export function buildThreadRows(
   options: ThreadRowsOptions,
 ): ThreadRows {
   const numbers = new Map<string, number>();
-  threadIndex(groups).forEach((thread, index) => {
+  threadIndex(options.numbering ?? groups).forEach((thread, index) => {
     numbers.set(thread.id, index + 1);
   });
   const digits = Math.max(1, String(numbers.size).length);

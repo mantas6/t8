@@ -29,6 +29,7 @@ const EMPTY = {} as const;
 export const closedThreadView: ThreadViewState = {
   threadId: null,
   phase: "closed",
+  error: null,
   sequence: null,
   thread: null,
   runs: EMPTY,
@@ -61,6 +62,11 @@ function upsert<T extends { readonly id: string }>(
   return record[item.id] === item ? record : { ...record, [item.id]: item };
 }
 
+/** The server refused `threadId`: an empty view carrying the error. */
+export function failedThreadView(threadId: ThreadId, error: string): ThreadViewState {
+  return { ...closedThreadView, threadId, phase: "error", error };
+}
+
 /** Replaces the view with a snapshot. A snapshot for another thread is ignored. */
 export function applyThreadSnapshot(
   state: ThreadViewState,
@@ -71,6 +77,7 @@ export function applyThreadSnapshot(
   return {
     threadId: projection.thread.id,
     phase: "ready",
+    error: null,
     sequence: item.snapshotSequence,
     thread: projection.thread,
     runs: byId(projection.runs),

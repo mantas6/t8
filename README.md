@@ -79,7 +79,21 @@ sequences (`gg`, `]]`, `za`) with a 500 ms timeout. `?` shows the full list.
 | --------------- | ---------------------------------------------------- |
 | `y` / `n`       | approve / deny                                       |
 | `1`-`9`         | pick an option or answer                             |
+| `i`             | type the answer (free-text questions, own answers)   |
 | `Esc` / `Enter` | leave the request (it stays visible) / go back to it |
+
+A request that appears (or whose options change) ignores `y`, `n` and `1`-`9`
+for half a second, so keys meant for something else cannot answer it unseen;
+each request is answered once. If it appears while you are typing a message,
+the input keeps the keyboard and the request shows above it: `Esc`, then
+`Enter` to answer it. A question without options, or one that allows its own
+answer, is answered by typing (`i`, then `Enter`); a request the provider wants
+answered by message (`responseCapability: message`) takes a normal message.
+
+Sending keeps the draft in the input until the server has accepted it. While
+disconnected, a command waits up to 3 seconds for the connection and then
+fails with "not connected"; sending the same draft again reuses its message
+and command ids, so the server drops a duplicate if the first try did arrive.
 
 #### Commands
 
@@ -100,7 +114,7 @@ this session. An unknown command says so in the status line.
 | `:archive`              | archive the open thread (asks first)                           |
 | `:a` `:approve`         | approve the pending request                                    |
 | `:d` `:deny`            | deny the pending request                                       |
-| `:reconnect`            | drop the connection and reconnect now                          |
+| `:reconnect`            | reconnect now; after a fatal error, try again (token re-read)  |
 | `:h` `:help`            | keys and commands                                              |
 | `:q`                    | quit; refused while a run is active in the open thread         |
 | `:qa` `:q!`             | quit anyway                                                    |
@@ -183,7 +197,9 @@ Settings are resolved in this order (first wins):
    A relative `tokenFile` is resolved against the config directory.
 4. Defaults: `http://localhost:3773` and `~/.config/t3tui/token`
 
-The token is never accepted as a command-line argument.
+The token is never accepted as a command-line argument. It is read again on
+every connection attempt: after the server rejected it (the status line says
+`failed`), fix the token file and run `:reconnect`.
 
 ### Headless CLI
 

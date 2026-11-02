@@ -14,7 +14,9 @@ import type {
 } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid";
 import {
+  type CommandId,
   DEFAULT_RUNTIME_MODE,
+  type MessageId,
   type ModelSelection,
   type ProjectId,
   type RunId,
@@ -36,7 +38,7 @@ import {
 } from "solid-js";
 import { createStore, reconcile, unwrap } from "solid-js/store";
 
-import type { DeliveryIntent } from "../commands.ts";
+import { type DeliveryIntent, newCommandId, newMessageId } from "../commands.ts";
 import { selectProjectGroups } from "../state/selectors.ts";
 import type {
   DisplayItem,
@@ -112,6 +114,12 @@ export const NO_THREAD_PLACEHOLDER = "No thread open. Press : then t to pick a t
 
 const DOUBLE_CTRL_C_MS = 1_000;
 
+/**
+ * A new runtime request (or one whose options changed) ignores y/n/1-9 for
+ * this long, so keys typed for something else do not answer it unseen.
+ */
+export const REQUEST_ARM_MS = 500;
+
 export interface AppProps {
   readonly backend: Backend;
   readonly initialThreadId?: ThreadId | null;
@@ -119,6 +127,8 @@ export interface AppProps {
   readonly keymaps?: CompiledKeymaps;
   /** Background problems (sync errors) to show in the status line; returns an unsubscribe. */
   readonly subscribeErrors?: (listener: (message: string) => void) => () => void;
+  /** Overrides `REQUEST_ARM_MS` (tests). */
+  readonly requestArmMs?: number;
 }
 
 type AnswerableRequest = PendingApproval | PendingUserInput;
@@ -128,6 +138,46 @@ interface InputProgressState extends UserInputProgress {
 }
 
 const EMPTY_PROGRESS: InputProgressState = { question: 0, selected: [], answers: {} };
+
+/** A message draft and the ids it was first sent with, reused when it is resent. */
+interface SendAttempt {
+  readonly text: string;
+  readonly commandId: CommandId;
+  readonly messageId: MessageId;
+}
+
+/**
+ * How typed text can answer a user-input request: as the answer to the
+ * current question (`answer`: free-text questions and custom answers), as a
+ * normal message (`message`), or not at all.
+ */
+export function textAnswerMode(
+  request: PendingApproval | PendingUserInput | undefined,
+  questionIndex: number,
+): "answer" | "message" | null {
+  if (request?.type !== "user_input") return null;
+  const question = request.questions[questionIndex];
+  if (
+    question !== undefined &&
+    request.responseCapability !== "message" &&
+    (question.options.length === 0 || question.allowCustomAnswer === true)
+  ) {
+    return "answer";
+  }
+  return request.answerableByMessage ? "message" : null;
+}
+
+/** Identity of what a request offers; a change re-arms the prompt. */
+function requestKey(request: PendingApproval | PendingUserInput): string {
+  const offered =
+    request.type === "approval"
+      ? request.options.map((option) => `${option.decision}:${option.label}`)
+      : request.questions.map(
+          (question) =>
+            `${question.id}:${question.options.map((option) => option.label).join("/")}`,
+        );
+  return `${request.requestId}\n${offered.join("\n")}`;
+}
 
 /** Pickers with a filter input; the others (modes, queue) are plain lists. */
 const FILTERED_PICKERS: ReadonlySet<View> = new Set<View>(["threads", "projects", "models"]);
@@ -176,6 +226,7 @@ export function App(props: AppProps) {
   let filterInput: InputRenderable | undefined;
   let helpScroll: ScrollBoxRenderable | undefined;
   let sequenceTimer: ReturnType<typeof setTimeout> | undefined;
+  let armTimer: ReturnType<typeof setTimeout> | undefined;
   let lastCtrlC = 0;
 
   const unsubscribeErrors = props.subscribeErrors?.((message) =>
@@ -185,6 +236,7 @@ export function App(props: AppProps) {
     unsubscribeErrors?.();
     ui.dispose();
     if (sequenceTimer !== undefined) clearTimeout(sequenceTimer);
+    if (armTimer !== undefined) clearTimeout(armTimer);
   });
 
   // -------------------------------------------------------------------------
@@ -216,18 +268,50 @@ export function App(props: AppProps) {
   };
 
   const [progress, setProgress] = createSignal<InputProgressState>(EMPTY_PROGRESS);
+  /** Typed text can answer the current request (see `textAnswerMode`). */
+  const textMode = () => textAnswerMode(answerable(), progress().question);
   createEffect(
     on(
       () => answerable()?.requestId,
       (id, previous) => {
         if (id === undefined || id === previous) return;
-        // A new request takes the keyboard; the draft stays in the hidden input.
         setProgress(EMPTY_PROGRESS);
+        if (ui.mode() === "insert" && (textarea?.plainText ?? "").trim() !== "") {
+          // Mid-sentence: keep typing; the request shows, unfocused.
+          ui.setPromptFocused(false);
+          const what = answerable()?.type === "approval" ? "approval needed" : "input requested";
+          notice(`${what} · Esc, then Enter to answer`, "warn", 6_000);
+          return;
+        }
+        // A new request takes the keyboard; the draft stays in the hidden input.
         ui.setPromptFocused(true);
         if (ui.mode() === "insert") ui.setMode("normal");
       },
     ),
   );
+
+  // y/n/1-9 only act once the request has been on screen, unchanged, for a moment.
+  const [armed, setArmed] = createSignal(false);
+  createEffect(
+    on(
+      () => {
+        const request = answerable();
+        return request === undefined ? null : requestKey(request);
+      },
+      (key) => {
+        if (armTimer !== undefined) clearTimeout(armTimer);
+        armTimer = undefined;
+        setArmed(false);
+        if (key === null) return;
+        armTimer = setTimeout(() => {
+          armTimer = undefined;
+          setArmed(true);
+        }, props.requestArmMs ?? REQUEST_ARM_MS);
+      },
+    ),
+  );
+  /** Request ids answered or being answered: a second answer is not sent. */
+  const answered = new Set<string>();
 
   // Spinner frames only tick while something is running.
   const [tick, setTick] = createSignal(0);
@@ -287,6 +371,7 @@ export function App(props: AppProps) {
       if (answerable() !== undefined) runStatus = "awaiting approval";
       else if (activeRun !== null) runStatus = activeRun.status;
       else if (thread.state.phase === "loading") runStatus = "loading";
+      else if (thread.state.phase === "error") runStatus = "error";
       else runStatus = current?.status ?? null;
     }
     return {
@@ -305,13 +390,23 @@ export function App(props: AppProps) {
     const view = ui.view();
     if (isPickerView(view)) return PICKER_HINTS[view];
     if (mode() === "insert") {
+      if (promptShown()) {
+        const text = textMode();
+        if (text === "answer")
+          return "Enter answer the question · Shift-Enter/Ctrl-J newline · Esc normal";
+        if (text === "message")
+          return "Enter send as the answer · Shift-Enter/Ctrl-J newline · Esc normal";
+        return "Enter send · Esc, then Enter: back to the request";
+      }
       return "Enter send · Shift-Enter/Ctrl-J newline · Ctrl-S steer · Ctrl-Q queue · Esc normal · Ctrl-C clear";
     }
     const request = answerable();
     if (request !== undefined && promptActive()) {
-      return request.type === "approval"
-        ? `y approve · n deny · 1-${request.options.length} pick · Esc back to the transcript`
-        : "1-9 answer · y submit selection · Esc back to the transcript";
+      if (request.type === "approval") {
+        return `y approve · n deny · 1-${request.options.length} pick · Esc back to the transcript`;
+      }
+      const typing = textMode() === null ? "" : " · i type";
+      return `1-9 answer · y submit selection${typing} · Esc back to the transcript`;
     }
     if (request !== undefined) return "Enter back to the request · :a approve · :d deny · ? help";
     if (threadId() === null)
@@ -455,14 +550,29 @@ export function App(props: AppProps) {
       notice("no thread open", "warn");
       return;
     }
-    if (promptShown()) {
-      notice("answer the request first: y / n, or :a / :d", "warn");
+    if (promptShown() && textMode() === null) {
+      notice(
+        answerable()?.type === "approval"
+          ? "answer the request first: y / n, or :a / :d"
+          : "answer the question first: pick with 1-9",
+        "warn",
+      );
       return;
     }
     if (empty) textarea?.setText("");
     ui.setMode("insert");
   };
 
+  /** Empties the input if it still holds `text` (the user may have typed on). */
+  const clearDraft = (text: string) => {
+    if (textarea !== undefined && textarea.plainText.trim() === text) textarea.setText("");
+  };
+
+  /** The last draft sent, with its ids; resending the same text reuses them. */
+  let lastAttempt: SendAttempt | null = null;
+  let sending = false;
+
+  /** Sends the input. The draft stays in the input until the server accepted it. */
   const send = (intent: DeliveryIntent) => {
     const id = threadId();
     const text = (textarea?.plainText ?? "").trim();
@@ -471,34 +581,78 @@ export function App(props: AppProps) {
       notice("no thread open", "warn");
       return;
     }
-    textarea?.setText("");
+    if (promptShown() && textMode() === "answer") {
+      answerWithText(text);
+      return;
+    }
+    if (sending) {
+      notice("still sending the previous message", "warn");
+      return;
+    }
+    const attempt: SendAttempt =
+      lastAttempt?.text === text
+        ? lastAttempt
+        : { text, commandId: newCommandId(), messageId: newMessageId() };
+    lastAttempt = attempt;
+    sending = true;
     transcript?.toBottom();
+    if (shell.state.connection.state !== "connected") notice("not connected · waiting briefly…");
     const titleSeed = untitled.has(id) ? text : undefined;
-    untitled.delete(id);
-    backend.send(id, text, intent, titleSeed === undefined ? {} : { titleSeed }).then(
-      () => {
-        if (intent === "steer") notice("steered");
-        else if (intent === "queue" && thread.activeRun() !== null)
-          notice("queued · :queue to manage");
-      },
-      (error) => {
-        if (textarea !== undefined && textarea.plainText === "") textarea.setText(text);
-        notice(`send failed: ${describeError(error)}`, "error", 6_000);
-      },
-    );
+    backend
+      .send(id, text, intent, {
+        ...(titleSeed === undefined ? {} : { titleSeed }),
+        commandId: attempt.commandId,
+        messageId: attempt.messageId,
+      })
+      .then(
+        () => {
+          sending = false;
+          if (lastAttempt === attempt) lastAttempt = null;
+          untitled.delete(id);
+          clearDraft(text);
+          if (intent === "steer") notice("steered");
+          else if (intent === "queue" && thread.activeRun() !== null)
+            notice("queued · :queue to manage");
+          else if (shell.state.connection.state !== "connected") notice("sent");
+        },
+        (error) => {
+          sending = false;
+          notice(`send failed: ${describeError(error)} · the draft is kept`, "error", 6_000);
+        },
+      );
   };
 
+  /** Sends the response once per request; resolves whether it was accepted. */
   const respond = (
     request: AnswerableRequest,
     response: Parameters<Backend["respond"]>[2],
     label: string,
-  ) => {
+  ): Promise<boolean> => {
     const id = threadId();
-    if (id === null) return;
-    backend.respond(id, request.requestId, response).then(
-      () => notice(label),
-      (error) => notice(`response failed: ${describeError(error)}`, "error", 6_000),
+    if (id === null) return Promise.resolve(false);
+    if (answered.has(request.requestId)) {
+      notice("already answered · waiting for the server", "warn");
+      return Promise.resolve(false);
+    }
+    answered.add(request.requestId);
+    return backend.respond(id, request.requestId, response).then(
+      () => {
+        notice(label);
+        return true;
+      },
+      (error) => {
+        answered.delete(request.requestId);
+        notice(`response failed: ${describeError(error)}`, "error", 6_000);
+        return false;
+      },
     );
+  };
+
+  /** False (with a notice) while the request is too new to answer by key. */
+  const checkArmed = () => {
+    if (armed()) return true;
+    notice("the request just appeared or changed · read it, then answer", "warn");
+    return false;
   };
 
   const decide = (request: PendingApproval, index: number) => {
@@ -507,21 +661,43 @@ export function App(props: AppProps) {
       notice(`no option ${index + 1}`, "warn");
       return;
     }
-    respond(request, { decision: option.decision }, option.label);
+    void respond(request, { decision: option.decision }, option.label);
   };
 
-  /** Records an answer for the current question; responds once all are answered. */
-  const answer = (request: PendingUserInput, value: unknown) => {
+  /**
+   * Records an answer for the current question; responds once all are
+   * answered. Resolves whether the answer was taken; the progress is kept
+   * when the response fails, so picking again retries.
+   */
+  const answer = (request: PendingUserInput, value: unknown): Promise<boolean> => {
     const current = progress();
     const question = request.questions[current.question];
-    if (question === undefined) return;
+    if (question === undefined) return Promise.resolve(false);
     const answers = { ...current.answers, [question.id]: value };
     if (current.question + 1 < request.questions.length) {
       setProgress({ question: current.question + 1, selected: [], answers });
-      return;
+      return Promise.resolve(true);
     }
-    setProgress(EMPTY_PROGRESS);
-    respond(request, { answers }, "answered");
+    setProgress({ ...current, answers });
+    return respond(request, { answers }, "answered").then((ok) => {
+      if (ok && answerable()?.requestId === request.requestId) setProgress(EMPTY_PROGRESS);
+      return ok;
+    });
+  };
+
+  /** Typed text as the answer to the current question (free text or a custom answer). */
+  const answerWithText = (text: string) => {
+    const request = answerable();
+    if (request?.type !== "user_input") return;
+    void answer(request, text).then((ok) => {
+      if (!ok) return;
+      clearDraft(text);
+      if (answerable()?.requestId === request.requestId && textMode() !== "answer") {
+        // The next question wants a pick.
+        ui.setMode("normal");
+        ui.setPromptFocused(true);
+      }
+    });
   };
 
   const optionValue = (option: { readonly label: string; readonly value?: string | undefined }) =>
@@ -533,20 +709,42 @@ export function App(props: AppProps) {
       notice("no pending request", "warn");
       return;
     }
+    if (!checkArmed()) return;
     if (request.type === "approval") {
-      decide(request, Math.max(0, approveOptionIndex(request)));
+      const index = approveOptionIndex(request);
+      if (index === -1) {
+        notice(
+          `this request has no approve option: pick one with 1-${request.options.length}`,
+          "warn",
+        );
+        return;
+      }
+      decide(request, index);
       return;
     }
     const question = request.questions[progress().question];
-    if (question?.multiSelect === true && progress().selected.length > 0) {
+    if (question === undefined) {
+      if (request.questions.length === 0 && request.responseCapability !== "message") {
+        // Nothing to answer: acknowledge it so the run can go on.
+        void respond(request, { answers: {} }, "continued");
+      } else {
+        notice("answer with a normal message: i", "warn");
+      }
+      return;
+    }
+    if (question.multiSelect === true && progress().selected.length > 0) {
       const values = progress()
         .selected.map((n) => question.options[n - 1])
         .filter((option) => option !== undefined)
         .map(optionValue);
-      answer(request, values);
+      void answer(request, values);
       return;
     }
-    notice(`pick an answer with 1-${question?.options.length ?? 9}`, "warn");
+    if (question.options.length === 0) {
+      notice("type the answer: i", "warn");
+      return;
+    }
+    notice(`pick an answer with 1-${question.options.length}`, "warn");
   };
 
   const deny = () => {
@@ -555,6 +753,7 @@ export function App(props: AppProps) {
       notice("no pending request", "warn");
       return;
     }
+    if (!checkArmed()) return;
     if (request.type === "approval") {
       const index = denyOptionIndex(request);
       if (index === -1) notice("this request has no deny option", "warn");
@@ -567,6 +766,7 @@ export function App(props: AppProps) {
   const pick = (n: number) => {
     const request = answerable();
     if (request === undefined) return;
+    if (!checkArmed()) return;
     if (request.type === "approval") {
       decide(request, n - 1);
       return;
@@ -585,7 +785,7 @@ export function App(props: AppProps) {
       setProgress({ ...current, selected });
       return;
     }
-    answer(request, optionValue(option));
+    void answer(request, optionValue(option));
   };
 
   const searchStep = (direction: 1 | -1) => {
@@ -711,6 +911,7 @@ export function App(props: AppProps) {
     switch (view) {
       case "threads": {
         const built = buildThreadRows(pickerGroups(), {
+          numbering: shell.groups(),
           query,
           projectId: threadProject(),
           now: Date.now(),
@@ -1205,7 +1406,11 @@ export function App(props: AppProps) {
       }
       case "reconnect":
         backend.reconnect();
-        notice("reconnecting…");
+        notice(
+          shell.state.connection.state === "failed"
+            ? "restarting the connection…"
+            : "reconnecting…",
+        );
         return;
       case "usage":
         notice(command.message, "warn");
@@ -1469,9 +1674,10 @@ export function App(props: AppProps) {
           event.preventDefault();
           return;
         }
-        if (retry && token.length === 1) {
+        if (retry) {
           // The event was already marked handled; type the key ourselves.
-          typeIntoFilter(token);
+          const text = token === "<Space>" ? " " : token.length === 1 ? token : null;
+          if (text !== null) typeIntoFilter(text);
         }
         return;
       }
@@ -1514,6 +1720,11 @@ export function App(props: AppProps) {
         <Show when={thread.state.phase === "loading" && items().length === 0}>
           <text fg={colors.dim}> loading thread…</text>
         </Show>
+        <Show when={thread.state.phase === "error"}>
+          <text
+            fg={colors.error}
+          >{` could not load this thread: ${thread.state.error ?? "unknown error"}`}</text>
+        </Show>
         <Transcript
           items={items}
           hasMoreHistory={() => thread.state.hasMoreHistory}
@@ -1532,15 +1743,20 @@ export function App(props: AppProps) {
         )}
       </Show>
       <Composer
-        visible={() => !promptShown()}
-        focused={() => mode() === "insert" && !promptShown()}
+        visible={() => !promptShown() || mode() === "insert"}
+        focused={() => mode() === "insert"}
         ref={(element) => {
           textarea = element;
         }}
       />
       <Show when={answerable()}>
         {(request: Accessor<AnswerableRequest>) => (
-          <RequestPrompt request={request} focused={promptActive} progress={progress} />
+          <RequestPrompt
+            request={request}
+            focused={() => promptActive() && armed()}
+            progress={progress}
+            textMode={textMode}
+          />
         )}
       </Show>
       <Show

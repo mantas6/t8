@@ -10,7 +10,13 @@
  * - Connection status is mirrored into the shell store.
  *
  * A failing reducer or subscription is reported through `onError` and never
- * takes the sync down; subscriptions retry unless the connection failed fatally.
+ * takes the sync down. A failed subscription is retried after a delay; one
+ * that ended with a defect (effect/rpc ends a stream with one when an item
+ * fails to decode) resubscribes from a fresh snapshot, since items may have
+ * been lost. When the connection fails fatally the subscriptions wait for it
+ * to be restarted (`:reconnect`) and then resubscribe. A thread the server
+ * cannot serve (unknown, deleted, not authorized) is not retried: the thread
+ * view shows the error instead.
  */
 import {
   ORCHESTRATION_V2_WS_METHODS,
@@ -20,21 +26,31 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FiberHandle from "effect/FiberHandle";
 import * as Layer from "effect/Layer";
-import * as Schedule from "effect/Schedule";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import { Connection, ConnectionFatalError } from "../connection/connection.ts";
 import { createShellStore, createThreadStore, type ShellStore, type ThreadStore } from "./store.ts";
 
-const RETRY_DELAY = "2 seconds";
+const RETRY_DELAY: Duration.Input = "2 seconds";
+
+/** Typed `subscribeThread` failures retrying will not fix (`rpc.ts`). */
+const TERMINAL_THREAD_ERRORS: ReadonlySet<string> = new Set([
+  "OrchestrationV2GetThreadProjectionError",
+  "EnvironmentAuthorizationError",
+]);
 
 export interface SyncOptions {
   /** Called with a description of a non-fatal problem (bad item, stream error). */
   readonly onError?: (message: string) => void;
+  /** Pause before a failed subscription is retried. Default 2 seconds. */
+  readonly retryDelay?: Duration.Input;
 }
 
 export class StateSync extends Context.Service<
@@ -60,9 +76,24 @@ function describe(cause: unknown): string {
   return String(cause);
 }
 
+function errorTag(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("_tag" in error)) return undefined;
+  const tag = (error as { _tag: unknown })._tag;
+  return typeof tag === "string" ? tag : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null && "message" in error) {
+    const message = (error as { message: unknown }).message;
+    if (typeof message === "string" && message !== "") return message;
+  }
+  return describe(error);
+}
+
 export const make = Effect.fn("StateSync.make")(function* (options: SyncOptions = {}) {
   const connection = yield* Connection;
   const report = (message: string) => options.onError?.(message);
+  const retryDelay = options.retryDelay ?? RETRY_DELAY;
   const shell = createShellStore();
   const thread = createThreadStore();
   yield* Effect.addFinalizer(() =>
@@ -80,40 +111,74 @@ export const make = Effect.fn("StateSync.make")(function* (options: SyncOptions 
     }
   };
 
-  /** Reports stream failures and resubscribes after a delay, unless the connection is dead. */
-  const resilient = <E>(what: string, effect: Effect.Effect<void, E>) =>
-    effect.pipe(
-      Effect.tapCause((cause) =>
-        Cause.hasInterruptsOnly(cause)
-          ? Effect.void
-          : Effect.sync(() => report(`${what}: ${describe(Cause.squash(cause))}`)),
-      ),
-      Effect.retry({
-        while: (error) => !(error instanceof ConnectionFatalError),
-        schedule: Schedule.spaced(RETRY_DELAY),
-      }),
-      Effect.ignore,
-    );
+  /** Waits until the connection is no longer in the fatal `failed` state. */
+  const awaitRestart = SubscriptionRef.changes(connection.status).pipe(
+    Stream.filter((status) => status._tag !== "failed"),
+    Stream.runHead,
+    Effect.asVoid,
+  );
+
+  /**
+   * Runs `subscribe` until it is interrupted or fails terminally.
+   * - typed failure: reported, retried after `retryDelay`
+   * - `terminal(error)` returns true: handled by the caller, not retried
+   * - defect (e.g. an undecodable item): reported, retried from a fresh snapshot
+   * - `ConnectionFatalError`: waits for the connection to be restarted, then resubscribes
+   * - interruption: ends quietly
+   * `subscribe(fresh)` must ignore any resume cursor when `fresh` is true.
+   */
+  const resilient = <E>(
+    what: string,
+    subscribe: (fresh: boolean) => Effect.Effect<void, E | ConnectionFatalError>,
+    terminal: (error: E) => boolean = () => false,
+  ): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      let fresh = false;
+      while (true) {
+        const exit = yield* Effect.exit(subscribe(fresh));
+        fresh = false;
+        if (Exit.isSuccess(exit)) return;
+        const { cause } = exit;
+        if (Cause.hasInterruptsOnly(cause)) return;
+        const error = Cause.findErrorOption(cause);
+        if (Option.isSome(error)) {
+          if (error.value instanceof ConnectionFatalError) {
+            // The status line shows why; resubscribe once the connection is restarted.
+            yield* awaitRestart;
+            continue;
+          }
+          if (terminal(error.value as E)) return;
+          report(`${what}: ${describe(error.value)}`);
+        } else {
+          fresh = true;
+          report(`${what}: ${describe(Cause.squash(cause))}; resubscribing from a fresh snapshot`);
+        }
+        yield* Effect.sleep(retryDelay);
+      }
+    });
 
   yield* SubscriptionRef.changes(connection.status).pipe(
     Stream.runForEach((status) => Effect.sync(() => shell.setConnection(status))),
     Effect.forkScoped,
   );
 
-  yield* connection
-    .subscribe(({ client }) => {
-      const after = shell.state.sequence;
-      return client[ORCHESTRATION_V2_WS_METHODS.subscribeShell](
-        after === null ? {} : { afterSequence: after },
+  const shellSubscription = (fresh: boolean) => {
+    let skipResume = fresh;
+    return connection
+      .subscribe(({ client }) => {
+        const after = skipResume ? null : shell.state.sequence;
+        skipResume = false;
+        return client[ORCHESTRATION_V2_WS_METHODS.subscribeShell](
+          after === null ? {} : { afterSequence: after },
+        );
+      })
+      .pipe(
+        Stream.runForEach((item: OrchestrationV2ShellStreamItem) =>
+          Effect.sync(() => safely(`shell ${item.kind}`, () => shell.apply(item))),
+        ),
       );
-    })
-    .pipe(
-      Stream.runForEach((item: OrchestrationV2ShellStreamItem) =>
-        Effect.sync(() => safely(`shell ${item.kind}`, () => shell.apply(item))),
-      ),
-      (effect) => resilient("shell subscription", effect),
-      Effect.forkScoped,
-    );
+  };
+  yield* resilient("shell subscription", shellSubscription).pipe(Effect.forkScoped);
 
   const threadFiber = yield* FiberHandle.make<void, never>();
   let generation = 0;
@@ -123,27 +188,37 @@ export const make = Effect.fn("StateSync.make")(function* (options: SyncOptions 
       generation += 1;
       const current = generation;
       thread.reset(threadId);
-      const subscription = connection
-        .subscribe(({ client }) => {
-          const { state } = thread;
-          const resume =
-            state.threadId === threadId && state.sequence !== null
-              ? { afterSequence: state.sequence }
-              : {};
-          return client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId, ...resume });
-        })
-        .pipe(
-          Stream.runForEach((item: OrchestrationV2ThreadStreamItem) =>
-            Effect.sync(() => {
-              // A superseded subscription may still deliver a few items.
-              if (current !== generation) return;
-              safely(`thread ${item.kind}`, () => thread.apply(item));
-            }),
-          ),
-        );
+      const subscription = (fresh: boolean) => {
+        let skipResume = fresh;
+        return connection
+          .subscribe(({ client }) => {
+            const { state } = thread;
+            const resume =
+              !skipResume && state.threadId === threadId && state.sequence !== null
+                ? { afterSequence: state.sequence }
+                : {};
+            skipResume = false;
+            return client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId, ...resume });
+          })
+          .pipe(
+            Stream.runForEach((item: OrchestrationV2ThreadStreamItem) =>
+              Effect.sync(() => {
+                // A superseded subscription may still deliver a few items.
+                if (current !== generation) return;
+                safely(`thread ${item.kind}`, () => thread.apply(item));
+              }),
+            ),
+          );
+      };
+      const terminal = (error: unknown) => {
+        const tag = errorTag(error);
+        if (tag === undefined || !TERMINAL_THREAD_ERRORS.has(tag)) return false;
+        if (current === generation) thread.fail(threadId, errorMessage(error));
+        return true;
+      };
       return FiberHandle.run(
         threadFiber,
-        resilient(`thread ${threadId} subscription`, subscription),
+        resilient(`thread ${threadId} subscription`, subscription, terminal),
       );
     }).pipe(Effect.asVoid);
 

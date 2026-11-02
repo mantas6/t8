@@ -380,7 +380,11 @@ const shellCommand = (mode: OutputMode) =>
           if ("sequence" in item) {
             if (lastSequence !== undefined && item.sequence <= lastSequence) return false;
             lastSequence = item.sequence;
-          } else if (item.kind === "snapshot") {
+          } else if (
+            item.kind === "snapshot" &&
+            item.resolvedRepositoryIdentityRoots === undefined
+          ) {
+            // An enrichment snapshot (repository identities) is not a cursor.
             lastSequence = item.snapshot.snapshotSequence;
           }
           return true;

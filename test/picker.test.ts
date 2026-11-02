@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { ModelSelection, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  type ModelSelection,
+  ORCHESTRATION_V2_WS_METHODS,
+  type ProjectId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+
+import { reorderQueuedRun } from "../src/commands.ts";
+import { Connection, type Session } from "../src/connection/connection.ts";
 
 import type { ProjectGroup, ThreadSummary } from "../src/state/types.ts";
 import { buildModelRows } from "../src/tui/components/ModelPicker.tsx";
@@ -91,6 +102,69 @@ describe("picker navigation", () => {
     expect(reorderTarget(ids, 2, 1)).toEqual({ runId: "c", beforeRunId: null });
     expect(reorderTarget(ids, 0, -1)).toBeNull();
     expect(reorderTarget(ids, 3, 1)).toBeNull();
+  });
+
+  test("queue ends: the commands sent for moves at the top and bottom", async () => {
+    const dispatched: Array<Record<string, unknown>> = [];
+    const session = {
+      generation: 1,
+      environment: { label: "test", serverVersion: "0.0.0", capabilities: {} },
+      client: {
+        [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command: Record<string, unknown>) =>
+          Effect.sync(() => {
+            dispatched.push(command);
+            return { sequence: 1 };
+          }),
+      },
+    } as unknown as Session;
+    const connection = Layer.succeed(Connection)(
+      Connection.of({
+        config: {} as never,
+        status: {} as never,
+        session: Effect.succeed(session),
+        client: Effect.succeed(session.client),
+        sessions: {} as never,
+        subscribe: () => ({}) as never,
+        reconnectNow: Effect.void,
+        forceReconnect: Effect.void,
+      }),
+    );
+    const queue = ["r1", "r2", "r3"].map((id) => RunId.make(id));
+    const move = async (index: number, delta: -1 | 1) => {
+      const target = reorderTarget(queue, index, delta);
+      if (target === null) return null;
+      await Effect.runPromise(
+        reorderQueuedRun(ThreadId.make("thread-1"), target.runId, target.beforeRunId).pipe(
+          Effect.provide(connection),
+        ),
+      );
+      const { type, runId, beforeRunId } = dispatched.at(-1) ?? {};
+      return { type, runId, beforeRunId };
+    };
+    // Down from the second-to-last: to the end of the queue.
+    expect(await move(1, 1)).toEqual({
+      type: "queued-run.reorder",
+      runId: "r2",
+      beforeRunId: null,
+    });
+    // Up from the last: before the one above it.
+    expect(await move(2, -1)).toEqual({
+      type: "queued-run.reorder",
+      runId: "r3",
+      beforeRunId: "r2",
+    });
+    // Up from the second: to the front.
+    expect(await move(1, -1)).toEqual({
+      type: "queued-run.reorder",
+      runId: "r2",
+      beforeRunId: "r1",
+    });
+    // Past either end: nothing is sent.
+    expect(await move(0, -1)).toBeNull();
+    expect(await move(2, 1)).toBeNull();
+    expect(dispatched).toHaveLength(3);
+    expect(reorderTarget([RunId.make("only")], 0, 1)).toBeNull();
+    expect(reorderTarget([RunId.make("only")], 0, -1)).toBeNull();
   });
 
   test("relative time and highlighting", () => {
@@ -194,6 +268,37 @@ describe("thread picker rows", () => {
     expect(filtered.rows.map((row) => row.key)).toEqual(["project:p1", "c"]);
     const row = filtered.rows[1]?.segments.map((segment) => segment.text).join("") ?? "";
     expect(row).toMatch(/^2 /);
+  });
+
+  test("with archived threads listed, numbers still follow :b <n>", () => {
+    // Listing archived threads can reorder the groups (an archived thread was
+    // active more recently) and adds groups that only hold archived threads.
+    const withArchived: ReadonlyArray<ProjectGroup> = [
+      {
+        projectId: "p3" as ProjectId,
+        project: null,
+        title: "old",
+        lastActivityAt: NOW + 2000,
+        threads: [summary("x", "p3", "Old idea", { archived: true })],
+      },
+      { ...(groups[1] as ProjectGroup), lastActivityAt: NOW + 1000 },
+      groups[0] as ProjectGroup,
+    ];
+    const built = buildThreadRows(withArchived, {
+      numbering: groups,
+      query: "",
+      projectId: null,
+      now: NOW,
+      width: 80,
+      openThreadId: null,
+    });
+    const numbers = Object.fromEntries(
+      built.rows
+        .filter((row) => row.kind === "item")
+        .map((row) => [row.key, row.segments[0]?.text.trim()]),
+    );
+    expect(numbers).toEqual({ x: "-", d: "3", a: "1", b: "-", c: "2" });
+    expect(threadIndex(groups).map((thread) => String(thread.id))).toEqual(["a", "c", "d"]);
   });
 
   test("the best match gets the cursor; project narrowing", () => {

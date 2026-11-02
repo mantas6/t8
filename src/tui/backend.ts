@@ -2,10 +2,16 @@
  * What the TUI needs from the outside world: the stores, and promise-based
  * commands. `makeBackend` implements it over an Effect runtime holding
  * `Connection` and `StateSync`; tests pass a fake.
+ *
+ * Commands do not wait for a connection: unless one comes up within
+ * `CONNECT_GRACE`, they fail with `NotConnectedError` so the UI can say so
+ * (and keep the draft) instead of running them much later.
  */
 
 import {
+  type CommandId,
   isProviderAvailable,
+  type MessageId,
   type ModelSelection,
   type ProjectId,
   type ProviderInstanceId,
@@ -16,8 +22,12 @@ import {
   type ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as Data from "effect/Data";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import type * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import {
   archiveThread,
   cancelQueuedRun,
@@ -34,7 +44,7 @@ import {
   setModelSelection,
   setRuntimeMode,
 } from "../commands.ts";
-import { Connection } from "../connection/connection.ts";
+import { Connection, describeStatus, type Session } from "../connection/connection.ts";
 import { toThreadSummary } from "../state/reducers/shell.ts";
 import { toDisplayItem } from "../state/selectors.ts";
 import type { ShellStore, ThreadStore } from "../state/store.ts";
@@ -101,7 +111,39 @@ export interface NewThread {
 export interface SendOptions {
   /** Lets the server title a fresh, untitled thread from its first message. */
   readonly titleSeed?: string;
+  /**
+   * Ids for the message and its command. Reuse them when resending the same
+   * draft after a failure: the server dedupes on them, so a send that did
+   * arrive despite the error is not delivered twice.
+   */
+  readonly commandId?: CommandId;
+  readonly messageId?: MessageId;
 }
+
+/** How long a command waits for the connection to come up before failing. */
+export const CONNECT_GRACE: Duration.Input = "3 seconds";
+
+/** A command was refused because there is no connection. */
+export class NotConnectedError extends Data.TaggedError("NotConnectedError")<{
+  readonly message: string;
+}> {}
+
+/**
+ * Waits up to `grace` for a connected session, then fails with
+ * `NotConnectedError` describing the connection status.
+ */
+export const awaitConnected = (grace: Duration.Input = CONNECT_GRACE) =>
+  Effect.gen(function* () {
+    const connection = yield* Connection;
+    const session = yield* connection.session.pipe(
+      Effect.timeoutOption(grace),
+      // A fatal failure: no point in waiting.
+      Effect.catch(() => Effect.succeed(Option.none<Session>())),
+    );
+    if (session._tag === "Some") return session.value;
+    const status = yield* SubscriptionRef.get(connection.status);
+    return yield* new NotConnectedError({ message: `not connected (${describeStatus(status)})` });
+  });
 
 export interface Backend {
   readonly shell: ShellStore;
@@ -167,7 +209,7 @@ export async function makeBackend(
     }),
   );
   const run = <A, E>(effect: Effect.Effect<A, E, Connection>): Promise<A> =>
-    runtime.runPromise(effect);
+    runtime.runPromise(awaitConnected().pipe(Effect.andThen(effect)));
   let catalog: Promise<ModelCatalog> | undefined;
   return {
     shell: sync.shell,
@@ -177,12 +219,11 @@ export async function makeBackend(
     },
     send: async (threadId, text, intent, options = {}) => {
       await run(
-        sendMessage(
-          threadId,
-          text,
-          intent,
-          options.titleSeed === undefined ? {} : { titleSeed: options.titleSeed },
-        ),
+        sendMessage(threadId, text, intent, {
+          ...(options.titleSeed === undefined ? {} : { titleSeed: options.titleSeed }),
+          ...(options.commandId === undefined ? {} : { commandId: options.commandId }),
+          ...(options.messageId === undefined ? {} : { messageId: options.messageId }),
+        }),
       );
     },
     interrupt: async (threadId) => {

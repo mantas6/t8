@@ -109,11 +109,14 @@ export interface ProjectGroup {
 // ---------------------------------------------------------------------------
 // Thread view
 
-export type ThreadViewPhase = "closed" | "loading" | "ready";
+/** `error`: the server could not serve the thread (unknown, deleted, not authorized). */
+export type ThreadViewPhase = "closed" | "loading" | "ready" | "error";
 
 export interface ThreadViewState {
   readonly threadId: ThreadId | null;
   readonly phase: ThreadViewPhase;
+  /** Why the thread could not be loaded, in the `error` phase. */
+  readonly error: string | null;
   /** Last applied sequence (snapshot or event); null before the snapshot. */
   readonly sequence: number | null;
   readonly thread: OrchestrationV2AppThread | null;

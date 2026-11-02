@@ -168,6 +168,41 @@ describe("KeySequencer", () => {
     expect(feedAll(sequencer, ["d", "d"]).map(action).at(-1)).toEqual(["long", null]);
   });
 
+  test("a count before a prefix binding: 5gg, 2za", () => {
+    const sequencer = new KeySequencer();
+    expect(feedAll(sequencer, ["5", "g", "g"]).map(action)).toEqual([
+      "pending",
+      "pending",
+      ["top", 5],
+    ]);
+    expect(feedAll(sequencer, ["2", "z", "a"]).map(action)).toEqual([
+      "pending",
+      "pending",
+      ["toggle", 2],
+    ]);
+    expect(sequencer.isPending).toBe(false);
+  });
+
+  test("a lone g times out; the next key starts afresh", () => {
+    const sequencer = new KeySequencer({ timeoutMs: 500 });
+    expect(sequencer.feed("g", keymap, { now: 0 }).type).toBe("pending");
+    // The caller's timer fires: nothing is bound to `g` alone.
+    expect(sequencer.timeout(keymap)).toEqual({ type: "unbound", keys: "g" });
+    expect(action(sequencer.feed("j", keymap, { now: 100 }))).toEqual(["down", null]);
+    // Without the timer, a late key also drops the stale prefix.
+    expect(sequencer.feed("g", keymap, { now: 1_000 }).type).toBe("pending");
+    expect(action(sequencer.feed("j", keymap, { now: 1_600 }))).toEqual(["down", null]);
+  });
+
+  test("a count followed by an unbound key is dropped whole", () => {
+    const sequencer = new KeySequencer();
+    expect(feedAll(sequencer, ["4", "q"]).at(-1)).toEqual({ type: "unbound", keys: "4q" });
+    expect(sequencer.pending).toBe("");
+    // The count does not leak into the next binding.
+    expect(action(sequencer.feed("j", keymap, { now: 0 }))).toEqual(["down", null]);
+    expect(feedAll(sequencer, ["2", "g", "x"]).at(-1)).toEqual({ type: "unbound", keys: "2gx" });
+  });
+
   test("timeout drops an incomplete prefix", () => {
     const sequencer = new KeySequencer();
     sequencer.feed("g", keymap, { now: 0 });
@@ -212,6 +247,25 @@ describe("default keymaps", () => {
     expect(resolve("prompt", ["<Esc>"])).toBe("request.blur");
     // NORMAL bindings still work underneath
     expect(resolve("prompt", ["g", "g"])).toBe("scroll.top");
+  });
+
+  test("digits pick in the prompt layer and count in NORMAL", () => {
+    const run = (layer: "normal" | "prompt", tokens: ReadonlyArray<string>) => {
+      const sequencer = new KeySequencer();
+      let result: Resolution | undefined;
+      for (const token of tokens) {
+        result = sequencer.feed(token, keymaps[layer], { now: 0, allowCount: true });
+      }
+      return result?.type === "action"
+        ? [result.binding.action, result.binding.arg ?? null, result.count]
+        : result?.type;
+    };
+    expect(run("prompt", ["3"])).toEqual(["request.pick", 3, null]);
+    expect(run("normal", ["3"])).toBe("pending");
+    expect(run("normal", ["3", "j"])).toEqual(["scroll.lineDown", null, 3]);
+    expect(run("prompt", ["0"])).toBe("passthrough");
+    // In the prompt layer 2 is a pick, so `2j` picks option 2, then scrolls one line.
+    expect(run("prompt", ["2", "j"])).toEqual(["scroll.lineDown", null, null]);
   });
 
   test("INSERT", () => {

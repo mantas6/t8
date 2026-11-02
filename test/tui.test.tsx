@@ -12,9 +12,10 @@ import * as Schema from "effect/Schema";
 import { createShellStore, createThreadStore } from "../src/state/store.ts";
 import type { DisplayItem, ProjectGroup } from "../src/state/types.ts";
 import { App, NO_THREAD_PLACEHOLDER } from "../src/tui/App.tsx";
-import type { Backend, ModelCatalog, NewThread } from "../src/tui/backend.ts";
+import type { Backend, ModelCatalog, NewThread, SendOptions } from "../src/tui/backend.ts";
 import { copyToClipboard, osc52Sequence } from "../src/tui/clipboard.ts";
 import { findItem, findMatch, isMessage, itemText, oneLine, stepThread } from "../src/tui/nav.ts";
+import { question, requestEvents } from "./fixtures/requests.ts";
 import { projectShell, shellSnapshot, threadShell } from "./fixtures/shell.ts";
 
 const decode = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadStreamItem));
@@ -69,7 +70,11 @@ function fakeBackend() {
     modes: [] as string[],
     archived: [] as string[],
     reconnects: 0,
+    sendOptions: [] as SendOptions[],
+    responses: [] as Array<{ requestId: string; response: unknown }>,
   };
+  /** How many of the next sends / responses fail. */
+  const failures = { send: 0, respond: 0 };
   const backend: Backend = {
     shell,
     thread,
@@ -78,13 +83,24 @@ function fakeBackend() {
       thread.reset(threadId);
       if (threadId === THREAD_ID) for (const item of fixture) thread.apply(item);
     },
-    send: async (_threadId, text, intent) => {
+    send: async (_threadId, text, intent, options = {}) => {
+      calls.sendOptions.push(options);
+      if (failures.send > 0) {
+        failures.send -= 1;
+        throw new Error("not connected");
+      }
       calls.sent.push({ text, intent });
     },
     interrupt: async () => {
       calls.interrupts += 1;
     },
-    respond: async () => {},
+    respond: async (_threadId, requestId, response) => {
+      calls.responses.push({ requestId, response });
+      if (failures.respond > 0) {
+        failures.respond -= 1;
+        throw new Error("response rejected");
+      }
+    },
     fetchToolResult: async () => null,
     modelCatalog: async () => CATALOG,
     createThread: async (input) => {
@@ -112,7 +128,7 @@ function fakeBackend() {
     shell.dispose();
     thread.dispose();
   };
-  return { backend, calls, dispose };
+  return { backend, calls, failures, dispose };
 }
 
 let cleanup: Array<() => unknown> = [];
@@ -121,11 +137,20 @@ afterEach(async () => {
   cleanup = [];
 });
 
+const ARM_MS = 40;
+
 async function mount(threadId: ThreadId | null) {
   const fake = fakeBackend();
   let quits = 0;
   const setup = await testRender(
-    () => <App backend={fake.backend} initialThreadId={threadId} onQuit={() => (quits += 1)} />,
+    () => (
+      <App
+        backend={fake.backend}
+        initialThreadId={threadId}
+        onQuit={() => (quits += 1)}
+        requestArmMs={ARM_MS}
+      />
+    ),
     { width: 100, height: 30, kittyKeyboard: true, exitOnCtrlC: false },
   );
   cleanup.push(fake.dispose, () => setup.dispose());
@@ -365,6 +390,233 @@ describe("App", () => {
     app.mockInput.pressKey("y");
     await app.frame();
     expect(app.calls.archived).toEqual([THREAD_ID]);
+  });
+});
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("App: runtime requests", () => {
+  test("a request arriving mid-sentence does not take the keyboard", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    app.mockInput.pressKey("i");
+    await app.mockInput.typeText("draft");
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(events.approvalItem("req-1"));
+    app.backend.thread.apply(events.request("req-1", "command"));
+    const shown = await app.frame();
+    expect(shown).toContain("Approval needed");
+    expect(shown).toContain("INSERT");
+    expect(shown).toContain("Esc, then Enter to answer");
+    // y and n keep going into the draft.
+    await app.mockInput.typeText(" yn");
+    await sleep(ARM_MS * 2);
+    await app.mockInput.typeText("y");
+    const typed = await app.frame();
+    expect(typed).toContain("draft yny");
+    expect(app.calls.responses).toEqual([]);
+
+    // Esc, Enter focuses the prompt; then y approves.
+    app.mockInput.pressEscape();
+    app.mockInput.pressEnter();
+    await app.frame();
+    app.mockInput.pressKey("y");
+    await app.frame();
+    expect(app.calls.responses).toEqual([{ requestId: "req-1", response: { decision: "accept" } }]);
+  });
+
+  test("keys are ignored until the prompt is armed, and a request is answered once", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(events.approvalItem("req-1"));
+    app.backend.thread.apply(events.request("req-1", "command"));
+    await app.frame();
+    app.mockInput.pressKey("y");
+    expect(await app.frame()).toContain("just appeared or changed");
+    expect(app.calls.responses).toEqual([]);
+
+    await sleep(ARM_MS * 2);
+    app.mockInput.pressKey("y");
+    await app.frame();
+    app.mockInput.pressKey("n");
+    expect(await app.frame()).toContain("already answered");
+    expect(app.calls.responses).toEqual([{ requestId: "req-1", response: { decision: "accept" } }]);
+  });
+
+  test("changed options re-arm the prompt; y without an approve option is refused", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    // The request lands before the turn item: the default options show.
+    app.backend.thread.apply(events.request("req-2", "command"));
+    expect(await app.frame()).toContain("Approve for this session");
+    await sleep(ARM_MS * 2);
+    // Its describing item arrives with options of its own, none accept-like.
+    app.backend.thread.apply(
+      events.approvalItem("req-2", [
+        { decision: "decline", label: "Skip it" },
+        { decision: "cancel", label: "Stop the run" },
+      ]),
+    );
+    expect(await app.frame()).toContain("Skip it");
+    app.mockInput.pressKey("1");
+    expect(await app.frame()).toContain("just appeared or changed");
+    await sleep(ARM_MS * 2);
+    app.mockInput.pressKey("y");
+    expect(await app.frame()).toContain("no approve option");
+    expect(app.calls.responses).toEqual([]);
+    await command(app, "a");
+    expect(app.calls.responses).toEqual([]);
+    app.mockInput.pressKey("2");
+    await app.frame();
+    expect(app.calls.responses).toEqual([{ requestId: "req-2", response: { decision: "cancel" } }]);
+  });
+
+  test("a free-text question is answered by typing", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(events.userInputItem("req-3", [question("name", [])]));
+    app.backend.thread.apply(events.request("req-3", "user_input"));
+    expect(await app.frame()).toContain("Press i to type the answer");
+    await sleep(ARM_MS * 2);
+    app.mockInput.pressKey("i");
+    expect(await app.frame()).toContain("INSERT");
+    await app.mockInput.typeText("Ada");
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.responses).toEqual([
+      { requestId: "req-3", response: { answers: { name: "Ada" } } },
+    ]);
+    expect(app.calls.sent).toEqual([]);
+  });
+
+  test("a custom answer next to options", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(
+      events.userInputItem("req-4", [
+        question("color", ["red", "blue"], { allowCustomAnswer: true }),
+      ]),
+    );
+    app.backend.thread.apply(events.request("req-4", "user_input"));
+    expect(await app.frame()).toContain("type your own answer");
+    await sleep(ARM_MS * 2);
+    app.mockInput.pressKey("i");
+    await app.mockInput.typeText("green");
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.responses).toEqual([
+      { requestId: "req-4", response: { answers: { color: "green" } } },
+    ]);
+  });
+
+  test("a request answered by message sends a normal message", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(events.userInputItem("req-5", [question("plan", ["yes", "no"])]));
+    app.backend.thread.apply(events.request("req-5", "user_input", "pending", "message"));
+    expect(await app.frame()).toContain("answer with a normal message (i)");
+    await sleep(ARM_MS * 2);
+    app.mockInput.pressKey("i");
+    await app.mockInput.typeText("go ahead");
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.sent).toEqual([{ text: "go ahead", intent: "auto" }]);
+    expect(app.calls.responses).toEqual([]);
+  });
+
+  test("an approval still refuses INSERT", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(events.approvalItem("req-6"));
+    app.backend.thread.apply(events.request("req-6", "command"));
+    await app.frame();
+    app.mockInput.pressKey("i");
+    const frame = await app.frame();
+    expect(frame).toContain("answer the request first");
+    expect(frame).not.toContain("INSERT");
+  });
+
+  test("a failed answer keeps the progress, so picking again retries", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    const events = requestEvents();
+    app.backend.thread.apply(
+      events.userInputItem("req-7", [
+        question("a", ["one", "two"]),
+        question("b", ["three", "four"]),
+      ]),
+    );
+    app.backend.thread.apply(events.request("req-7", "user_input"));
+    await app.frame();
+    await sleep(ARM_MS * 2);
+    app.failures.respond = 1;
+    app.mockInput.pressKey("2");
+    expect(await app.frame()).toContain("Question b?");
+    app.mockInput.pressKey("1");
+    await app.frame();
+    expect(await app.frame()).toContain("response failed");
+    expect(await app.frame()).toContain("Question b?");
+    app.mockInput.pressKey("1");
+    await app.frame();
+    expect(app.calls.responses.map((call) => call.response)).toEqual([
+      { answers: { a: "two", b: "three" } },
+      { answers: { a: "two", b: "three" } },
+    ]);
+  });
+});
+
+describe("App: sending", () => {
+  test("a failed send keeps the draft; resending reuses its ids", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    app.failures.send = 1;
+    app.mockInput.pressKey("i");
+    await app.mockInput.typeText("hello");
+    app.mockInput.pressEnter();
+    await app.frame();
+    const failed = await app.frame();
+    expect(failed).toContain("send failed");
+    expect(failed).toContain("hello");
+    expect(app.calls.sent).toEqual([]);
+
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.sent).toEqual([{ text: "hello", intent: "auto" }]);
+    const [first, second] = app.calls.sendOptions;
+    expect(first?.commandId).toBeDefined();
+    expect(second?.commandId).toBe(first?.commandId);
+    expect(second?.messageId).toBe(first?.messageId);
+    expect(await app.frame()).not.toContain("hello");
+
+    // A new draft gets new ids.
+    await app.mockInput.typeText("again");
+    app.mockInput.pressEnter();
+    await app.frame();
+    expect(app.calls.sendOptions[2]?.commandId).not.toBe(first?.commandId);
+  });
+
+  test("a thread the server refuses shows the error", async () => {
+    const app = await mount(THREAD_ID);
+    await app.frame();
+    app.backend.thread.fail(THREAD_ID, "thread not found");
+    expect(await app.frame()).toContain("could not load this thread: thread not found");
+  });
+
+  test("a space after a held-back d in a picker is typed", async () => {
+    const app = await mount(null);
+    await app.frame();
+    await command(app, "t");
+    app.mockInput.pressKey("d");
+    app.mockInput.pressKey(" ");
+    app.mockInput.pressKey("x");
+    expect(await app.frame()).toContain("> d x");
   });
 });
 

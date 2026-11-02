@@ -60,13 +60,26 @@ function ApprovalBody(props: { request: PendingApproval }) {
   );
 }
 
-function UserInputBody(props: { request: PendingUserInput; progress: UserInputProgress }) {
+/** How typed text answers the request: see `textAnswerMode` in `App.tsx`. */
+export type TextAnswerMode = "answer" | "message" | null;
+
+function UserInputBody(props: {
+  request: PendingUserInput;
+  progress: UserInputProgress;
+  textMode: TextAnswerMode;
+}) {
   const question = () => props.request.questions[props.progress.question];
   const total = () => props.request.questions.length;
   return (
     <Show
       when={question()}
-      fallback={<text fg={colors.dim}>The provider asked for input without questions.</text>}
+      fallback={
+        <text fg={colors.dim}>
+          {props.textMode === "message"
+            ? "The provider asked for input without questions. Answer with a normal message (i)."
+            : "The provider asked for input without questions. y continues."}
+        </text>
+      }
     >
       {(current: Accessor<PendingUserInput["questions"][number]>) => (
         <box flexDirection="column">
@@ -89,8 +102,14 @@ function UserInputBody(props: { request: PendingUserInput; progress: UserInputPr
               );
             }}
           </For>
-          <Show when={props.request.answerableByMessage}>
-            <text fg={colors.faint}>You can also answer with a normal message (Esc, then i).</text>
+          <Show when={props.textMode !== null}>
+            <text fg={colors.faint}>
+              {props.textMode === "answer"
+                ? current().options.length === 0
+                  ? "Press i to type the answer."
+                  : "Or press i to type your own answer."
+                : "You can also answer with a normal message (i)."}
+            </text>
           </Show>
         </box>
       )}
@@ -102,6 +121,7 @@ export function RequestPrompt(props: {
   request: Accessor<PendingApproval | PendingUserInput>;
   focused: Accessor<boolean>;
   progress: Accessor<UserInputProgress>;
+  textMode: Accessor<TextAnswerMode>;
 }) {
   const title = () => {
     const request = props.request();
@@ -129,7 +149,11 @@ export function RequestPrompt(props: {
           when={props.request().type === "user_input" && (props.request() as PendingUserInput)}
         >
           {(request: Accessor<PendingUserInput>) => (
-            <UserInputBody request={request()} progress={props.progress()} />
+            <UserInputBody
+              request={request()}
+              progress={props.progress()}
+              textMode={props.textMode()}
+            />
           )}
         </Match>
       </Switch>

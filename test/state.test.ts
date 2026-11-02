@@ -624,3 +624,80 @@ describe("shell store", () => {
     store.dispose();
   });
 });
+
+describe("shell reducers: archive and unarchive in either event order", () => {
+  const start = applyShellStreamItem(initialShellState, fullSnapshot);
+  const updated = (sequence: number, id: string, location: "active" | "archive") =>
+    decodeShellItem({
+      kind: "thread.updated",
+      sequence,
+      location,
+      thread: threadShell(id, { archivedAt: location === "archive" ? NOW : null }),
+    });
+  const removed = (sequence: number, id: string, location: "active" | "archive") =>
+    decodeShellItem({ kind: "thread.removed", sequence, location, threadId: id });
+  const apply = (items: ReadonlyArray<ReturnType<typeof decodeShellItem>>) =>
+    items.reduce(applyShellStreamItem, start);
+  const listed = (state: ReturnType<typeof apply>) =>
+    selectProjectGroups(state).flatMap((group) => group.threads.map((thread) => String(thread.id)));
+
+  test("archive: updated-in-archive first, then removed-from-active", () => {
+    const state = apply([updated(101, "thread-a", "archive"), removed(102, "thread-a", "active")]);
+    expect(state.threads["thread-a"]?.archived).toBe(true);
+    expect(listed(state)).not.toContain("thread-a");
+  });
+
+  test("archive: removed-from-active first, then updated-in-archive", () => {
+    const state = apply([removed(101, "thread-a", "active"), updated(102, "thread-a", "archive")]);
+    expect(state.threads["thread-a"]?.archived).toBe(true);
+    expect(listed(state)).not.toContain("thread-a");
+  });
+
+  test("unarchive: updated-in-active first, then removed-from-archive", () => {
+    const state = apply([
+      updated(101, "thread-old", "active"),
+      removed(102, "thread-old", "archive"),
+    ]);
+    expect(state.threads["thread-old"]?.archived).toBe(false);
+    expect(listed(state)).toContain("thread-old");
+  });
+
+  test("unarchive: removed-from-archive first, then updated-in-active", () => {
+    const state = apply([
+      removed(101, "thread-old", "archive"),
+      updated(102, "thread-old", "active"),
+    ]);
+    expect(state.threads["thread-old"]?.archived).toBe(false);
+    expect(listed(state)).toContain("thread-old");
+  });
+});
+
+describe("thread store reset", () => {
+  test("deletes the previous thread's entries, also for readers of single keys", () => {
+    const store = createThreadStore();
+    for (const item of items) store.apply(item);
+    const ids = Object.keys(store.state.turnItems);
+    expect(ids.length).toBeGreaterThan(0);
+    const first = ids[0] as string;
+    expect(store.state.turnItems[first]).toBeDefined();
+
+    store.reset("thread-other" as ThreadId);
+    expect(store.state.phase).toBe("loading");
+    expect(store.state.threadId).toBe("thread-other" as ThreadId);
+    for (const key of ["runs", "nodes", "turnItems", "messages", "runtimeRequests"] as const) {
+      expect(Object.keys(store.state[key])).toEqual([]);
+    }
+    expect(store.state.turnItems[first]).toBeUndefined();
+    expect(store.transcript()).toEqual([]);
+
+    store.fail("thread-other" as ThreadId, "thread not found");
+    expect([store.state.phase, store.state.error]).toEqual(["error", "thread not found"]);
+    store.reset(null);
+    expect([store.state.phase, store.state.error, store.state.threadId]).toEqual([
+      "closed",
+      null,
+      null,
+    ]);
+    store.dispose();
+  });
+});

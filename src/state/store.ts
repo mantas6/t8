@@ -22,7 +22,12 @@ import {
   applyShellStreamItem,
   initialShellState,
 } from "./reducers/shell.ts";
-import { applyThreadStreamItem, closedThreadView, loadingThreadView } from "./reducers/thread.ts";
+import {
+  applyThreadStreamItem,
+  closedThreadView,
+  failedThreadView,
+  loadingThreadView,
+} from "./reducers/thread.ts";
 import {
   selectActiveRun,
   selectPendingRequests,
@@ -150,6 +155,8 @@ export interface ThreadStore {
   readonly apply: (item: OrchestrationV2ThreadStreamItem) => boolean;
   /** Empties the view: loading `threadId`, or closed for null. */
   readonly reset: (threadId: ThreadId | null) => void;
+  /** Empties the view and records why `threadId` could not be loaded (phase `error`). */
+  readonly fail: (threadId: ThreadId, error: string) => void;
   readonly dispose: () => void;
 }
 
@@ -190,6 +197,9 @@ export function createThreadStore(initial: ThreadViewState = closedThreadView): 
       apply: (item) => update((current) => applyThreadStreamItem(current, item)),
       reset: (threadId) => {
         update(() => (threadId === null ? closedThreadView : loadingThreadView(threadId)));
+      },
+      fail: (threadId, error) => {
+        update(() => failedThreadView(threadId, error));
       },
       dispose,
     };

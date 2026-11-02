@@ -11,14 +11,24 @@
  * - Reconnect: one RPC session per socket (like upstream, the protocol itself
  *   never retries). When a session ends the supervisor waits 1s, 2s, 4s, ...
  *   up to 30s and dials again; a session that reached "connected" resets the
- *   backoff.
+ *   backoff. `forceReconnect` ends the current session at once (without
+ *   waiting for the socket's close handshake) and dials again with no delay.
  * - Fatal errors: when the socket closes before it opened, the endpoint is
  *   probed with a plain HTTP GET carrying the same credentials. The server
  *   checks the protocol param and the credential before upgrading, so 426
  *   means protocol mismatch and 401/403 means a bad or under-scoped token.
- *   Those stop the supervisor with a `failed` status instead of retrying.
+ *   Those park the supervisor with a `failed` status instead of retrying;
+ *   `reconnectNow` / `forceReconnect` restart it (the token is read again, so
+ *   fixing the token file and running `:reconnect` is enough). `sessions`
+ *   fails while the status is `failed`; subscribers that want to survive a
+ *   restart wait for the status to change and subscribe again (`StateSync`).
+ * - Session scopes: each connected session's resources live in their own
+ *   scope, closed once the next session has connected (or on a fatal error /
+ *   shutdown). Closing it interrupts the old session's open requests; streams
+ *   run through `subscribe` treat that like a transport error and end quietly.
  */
 import type { ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
@@ -51,8 +61,6 @@ import {
 
 export const BACKOFF_INITIAL_MS = 1_000;
 export const BACKOFF_MAX_MS = 30_000;
-/** Pause before reconnecting after `forceReconnect` closed the socket. */
-const REQUESTED_RECONNECT_DELAY_MS = 250;
 
 export type FatalReason = "protocol-mismatch" | "unauthorized" | "forbidden" | "config";
 
@@ -101,12 +109,15 @@ export class Connection extends Context.Service<
     readonly subscribe: <A, E>(
       f: (session: Session) => Stream.Stream<A, E>,
     ) => Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | ConnectionFatalError>;
-    /** Skips the remaining backoff delay, if the supervisor is waiting. */
+    /**
+     * Skips the remaining backoff delay, if the supervisor is waiting, or
+     * restarts it after a fatal failure.
+     */
     readonly reconnectNow: Effect.Effect<void>;
     /**
-     * Reconnects now: closes the open socket (streams fail over to the next
+     * Reconnects now: ends the open session (streams fail over to the next
      * session as on any drop, and the retry skips the backoff), or skips the
-     * backoff when already disconnected.
+     * backoff when already disconnected, or restarts after a fatal failure.
      */
     readonly forceReconnect: Effect.Effect<void>;
   }
@@ -201,23 +212,37 @@ export const diagnoseHandshake = (
 
 export const make = Effect.fn("Connection.make")(function* (config: ResolvedConfig) {
   const status = yield* SubscriptionRef.make<ConnectionStatus>({ _tag: "connecting", attempt: 1 });
+  /** Completed to end the supervisor's wait: the backoff delay, or the parked `failed` state. */
   const wake = yield* Ref.make(yield* Deferred.make<void>());
   let generation = 0;
+  /** Generation of the session that is connected right now; 0 while there is none. */
+  let liveGeneration = 0;
   let currentSocket: WebSocket | undefined;
+  /** The connected attempt's `disconnected` signal, so `forceReconnect` can end it. */
+  let currentDisconnected: Deferred.Deferred<void> | undefined;
   let reconnectRequested = false;
 
-  // Each connected session lives in its own scope. It is closed at the start
-  // of the next attempt rather than as soon as the socket drops: closing it
-  // right away would interrupt in-flight streams before the protocol has
-  // failed them with the transport error, and consumers could not tell a lost
-  // connection from a deliberate interruption.
-  let sessionScope: Scope.Closeable | undefined;
-  const closeSessionScope = Effect.suspend(() => {
-    const scope = sessionScope;
-    sessionScope = undefined;
-    return scope === undefined ? Effect.void : Scope.close(scope, Exit.void);
+  // Scopes: the attempt in progress (or the connected session), and the
+  // previous session's, which stays open until the next session connects.
+  // Closing a session scope as soon as its socket drops would interrupt its
+  // in-flight requests before the protocol fails them with the transport
+  // error; keeping it a little longer lets most of them end that way.
+  let attemptScope: Scope.Closeable | undefined;
+  let retiredScope: Scope.Closeable | undefined;
+  const closeScope = (scope: Scope.Closeable | undefined) =>
+    scope === undefined ? Effect.void : Scope.close(scope, Exit.void);
+  const closeRetired = Effect.suspend(() => {
+    const scope = retiredScope;
+    retiredScope = undefined;
+    return closeScope(scope);
   });
-  yield* Effect.addFinalizer(() => closeSessionScope);
+  yield* Effect.addFinalizer(() =>
+    Effect.suspend(() => {
+      const scope = attemptScope;
+      attemptScope = undefined;
+      return closeScope(scope);
+    }).pipe(Effect.andThen(closeRetired)),
+  );
 
   const connectOnce: Effect.Effect<AttemptOutcome, never, Scope.Scope> = Effect.gen(function* () {
     const token = yield* Effect.tryPromise({
@@ -300,11 +325,17 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     }
 
     generation += 1;
+    liveGeneration = generation;
+    currentDisconnected = disconnected;
     yield* SubscriptionRef.set(status, {
       _tag: "connected",
       session: { generation, client, environment },
     });
+    // The previous session is over for good now that this one is up.
+    yield* closeRetired;
     yield* Deferred.await(disconnected);
+    liveGeneration = 0;
+    currentDisconnected = undefined;
     const timedOut = yield* Ref.get(pingTimedOut);
     return {
       _tag: "lost",
@@ -318,13 +349,22 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
   });
 
   const attempt: Effect.Effect<AttemptOutcome> = Effect.gen(function* () {
-    yield* closeSessionScope;
     const scope = yield* Scope.make();
     // Registered before use so the layer finalizer also closes an attempt
     // that is interrupted half-way (e.g. on shutdown).
-    sessionScope = scope;
+    attemptScope = scope;
     const outcome = yield* Scope.provide(connectOnce, scope);
-    if (outcome._tag === "fatal" || !outcome.wasConnected) yield* closeSessionScope;
+    attemptScope = undefined;
+    if (outcome._tag === "fatal") {
+      yield* closeScope(scope);
+      yield* closeRetired;
+    } else if (outcome.wasConnected) {
+      // Normally already closed when this session connected.
+      yield* closeRetired;
+      retiredScope = scope;
+    } else {
+      yield* closeScope(scope);
+    }
     return outcome;
   });
 
@@ -335,29 +375,38 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
       attemptNumber += 1;
       yield* SubscriptionRef.set(status, { _tag: "connecting", attempt: attemptNumber });
       const outcome = yield* attempt;
+      const signal = yield* Deferred.make<void>();
+      // Set before the status changes, so a reconnect requested in reaction
+      // to the new status completes this signal and not a stale one.
+      yield* Ref.set(wake, signal);
       if (outcome._tag === "fatal") {
+        // Parked until `reconnectNow` / `forceReconnect`; then a fresh start.
         yield* SubscriptionRef.set(status, { _tag: "failed", error: outcome.error });
-        return;
+        yield* Deferred.await(signal);
+        attemptNumber = 0;
+        delayMs = BACKOFF_INITIAL_MS;
+        reconnectRequested = false;
+        continue;
       }
       if (outcome.wasConnected) {
         attemptNumber = 0;
         delayMs = BACKOFF_INITIAL_MS;
       }
-      const signal = yield* Deferred.make<void>();
-      yield* Ref.set(wake, signal);
+      // A requested reconnect dials again at once. No pause is needed for the
+      // old session's streams: its scope stays open until the next session
+      // connects, and `subscribe` ends them quietly either way.
+      const wait = reconnectRequested ? 0 : delayMs;
+      reconnectRequested = false;
       yield* SubscriptionRef.set(status, {
         _tag: "disconnected",
         reason: outcome.reason,
         attempt: attemptNumber,
-        retryAt: Date.now() + delayMs,
+        retryAt: Date.now() + wait,
       });
-      // A requested reconnect still pauses briefly: the old session's streams
-      // must fail with the transport error before its scope is closed (see
-      // `sessionScope`), or consumers would see an interruption instead.
-      const wait = reconnectRequested ? REQUESTED_RECONNECT_DELAY_MS : delayMs;
-      reconnectRequested = false;
-      yield* Effect.sleep(Duration.millis(wait)).pipe(Effect.raceFirst(Deferred.await(signal)));
-      delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
+      if (wait > 0) {
+        yield* Effect.sleep(Duration.millis(wait)).pipe(Effect.raceFirst(Deferred.await(signal)));
+        delayMs = Math.min(delayMs * 2, BACKOFF_MAX_MS);
+      }
     }
   });
   yield* Effect.forkScoped(supervisor);
@@ -383,7 +432,15 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
   const subscribe = <A, E>(f: (session: Session) => Stream.Stream<A, E>) =>
     sessions.pipe(
       Stream.switchMap((current) =>
-        f(current).pipe(Stream.catchIf(isTransportError, () => Stream.empty)),
+        f(current).pipe(
+          Stream.catchIf(isTransportError, () => Stream.empty),
+          // Closing an ended session's scope interrupts its open requests;
+          // for the stream that is the same as losing the socket.
+          Stream.catchCauseIf(
+            (cause) => Cause.hasInterruptsOnly(cause) && current.generation !== liveGeneration,
+            () => Stream.empty,
+          ),
+        ),
       ),
     ) as Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | ConnectionFatalError>;
 
@@ -403,11 +460,17 @@ export const make = Effect.fn("Connection.make")(function* (config: ResolvedConf
     forceReconnect: SubscriptionRef.get(status).pipe(
       Effect.flatMap((current) => {
         const socket = currentSocket;
-        if (current._tag !== "connected" || socket === undefined) return reconnectNow;
+        const disconnected = currentDisconnected;
+        if (current._tag !== "connected" || disconnected === undefined) return reconnectNow;
         return Effect.sync(() => {
           reconnectRequested = true;
-          socket.close(RECONNECT_CLOSE_CODE, "reconnect requested");
-        });
+          socket?.close(RECONNECT_CLOSE_CODE, "reconnect requested");
+        }).pipe(
+          // End the session now rather than when the close handshake finishes
+          // (an unresponsive server would hold it until the ping timeout).
+          Effect.andThen(Deferred.succeed(disconnected, undefined)),
+          Effect.asVoid,
+        );
       }),
     ),
   });
