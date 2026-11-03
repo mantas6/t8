@@ -390,18 +390,47 @@ Bun FFI. It only links against glibc (`libc`, `libm`, `libpthread`, `libdl`),
 which Bun has already loaded, so it works on NixOS without `nix-ld` or
 patching.
 
+## Install without Nix (macOS, Linux)
+
+One line, no Nix needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mantas6/t8/main/install.sh | bash
+```
+
+The script installs [Bun](https://bun.com) from bun.sh into `~/.bun` if `bun`
+is not on your PATH, downloads the t8 sources into `~/.local/share/t8`,
+installs their runtime dependencies there, and writes a `t8` launcher into
+`~/.local/bin` (it tells you if that directory is not on your PATH). Then:
+
+```sh
+t8 connect '<pairing link>'
+t8
+```
+
+Run the same line again to update. Variables:
+
+| Variable  | Default             | Meaning                    |
+| --------- | ------------------- | -------------------------- |
+| `T8_HOME` | `~/.local/share/t8` | Where the sources go       |
+| `T8_BIN`  | `~/.local/bin`      | Where the launcher goes    |
+| `T8_REF`  | `main`              | Branch, tag or commit      |
+| `T8_REPO` | `mantas6/t8`        | GitHub repository (a fork) |
+
+To uninstall, delete `~/.local/share/t8` and `~/.local/bin/t8` (and `~/.bun` if
+the script installed Bun and nothing else uses it).
+
 ## Install with Nix
 
 The flake builds a `t8` command that runs the sources with Bun from
-nixpkgs (currently for `x86_64-linux`). Replace `<owner>` with the GitHub
-owner of this repository.
+nixpkgs (currently for `x86_64-linux`).
 
 ```sh
 # Run without installing
-nix run github:<owner>/t8 -- --server http://localhost:3773 --thread <threadId>
+nix run github:mantas6/t8 -- --server http://localhost:3773 --thread <threadId>
 
 # Install into your profile
-nix profile install github:<owner>/t8
+nix profile install github:mantas6/t8
 ```
 
 As a flake input of a NixOS or home-manager configuration:
@@ -411,7 +440,7 @@ As a flake input of a NixOS or home-manager configuration:
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     t8 = {
-      url = "github:<owner>/t8";
+      url = "github:mantas6/t8";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
